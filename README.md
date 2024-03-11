@@ -115,7 +115,7 @@ bash scripts/download_tum.sh
 You can run Co-SLAM using the code below:
 
 ```
-python coslam.py --config './configs/{Dataset}/{scene}.yaml 
+python coslam.py --config './configs/{Dataset}/{scene}.yaml' 
 ```
 
 
