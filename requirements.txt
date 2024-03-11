@@ -25,5 +25,5 @@ trimesh==3.21.5
 typing_extensions==4.5.0
 wheel==0.38.4
 yacs==0.1.8
-git+https://github.com/facebookresearch/pytorch3d.git
-git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+# git+https://github.com/facebookresearch/pytorch3d.git
+# git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
