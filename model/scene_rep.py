@@ -13,6 +13,9 @@ class JointEncoding(nn.Module):
         self.config = config
         self.bounding_box = bound_box
         self.get_resolution()
+        # 联合编码方案:
+        # 1. parametric encoding用HashGrid
+        # 2. coordinate encoding用OneBlob
         self.get_encoding(config)
         self.get_decoder(config)
         
@@ -37,8 +40,13 @@ class JointEncoding(nn.Module):
     def get_encoding(self, config):
         '''
         Get the encoding of the scene representation
+        以tum.yaml为例
+        config['pos']['enc']: 'OneBlob'
+        config['grid']['enc']: 'HashGrid'
+        config['grid']['oneGrid']: 'True'
         '''
         # Coordinate encoding
+        # get_encoder函数由 tcnn引入,包含了常用的编码方式(四种)
         self.embedpos_fn, self.input_ch_pos = get_encoder(config['pos']['enc'], n_bins=self.config['pos']['n_bins'])
 
         # Sparse parametric encoding (SDF)
@@ -52,12 +60,17 @@ class JointEncoding(nn.Module):
     def get_decoder(self, config):
         '''
         Get the decoder of the scene representation
+        对应神经网络部分接受编码信息,输出颜色和SDF
+        TODO 输出 beta
+        config['grid']['oneGrid']: 'True'
+        ColorSDFNet只有 SDF Grid
+        ColorSDFNet_v2有 SDF Grid 和 Color Grid
         '''
         if not self.config['grid']['oneGrid']:
             self.decoder = ColorSDFNet(config, input_ch=self.input_ch, input_ch_pos=self.input_ch_pos)
         else:
             self.decoder = ColorSDFNet_v2(config, input_ch=self.input_ch, input_ch_pos=self.input_ch_pos)
-        
+        # 对应公式 2, 3 默认调用 v2
         self.color_net = batchify(self.decoder.color_net, None)
         self.sdf_net = batchify(self.decoder.sdf_net, None)
 
@@ -196,43 +209,59 @@ class JointEncoding(nn.Module):
         return rgb
     
     def render_rays(self, rays_o, rays_d, target_d=None):
-        '''
+        '''在 forward 函数中调用
         Params:
             rays_o: [N_rays, 3]
             rays_d: [N_rays, 3]
             target_d: [N_rays, 1]
 
         '''
+        # ----------------- 光线采样 -----------------
         n_rays = rays_o.shape[0]
-
+        #
         # Sample depth
         if target_d is not None:
+            # 如果有目标深度,则在目标深度[-range_d, range_d]范围内均匀/等间隔采样21个点
+            # range_d: 0.25
+            # n_range_d: 21
             z_samples = torch.linspace(-self.config['training']['range_d'], self.config['training']['range_d'], steps=self.config['training']['n_range_d']).to(target_d) 
             z_samples = z_samples[None, :].repeat(n_rays, 1) + target_d
-            z_samples[target_d.squeeze()<=0] = torch.linspace(self.config['cam']['near'], self.config['cam']['far'], steps=self.config['training']['n_range_d']).to(target_d) 
+            # squeeze()函数是为了去除张量中维度为1的维度
+            # 对于目标深度为负值的点：
+            # 在深度near到far的范围内生成n_range_d个等间隔的张量。
+            # 深度值被赋给z_samples中相应位置，覆盖原先的目标深度为负值的部分。
+            # 使用前的张量是：
+            # tensor([[1],
+            #         [2],
+            #         [3]])
+            # 使用squeeze()后得到的张量是：
+            # tensor([1, 2, 3])
+            z_samples[target_d.squeeze()<=0] = torch.linspace(self.config['cam']['near'], self.config['cam']['far'], steps=self.config['training']['n_range_d']).to(target_d)
 
             if self.config['training']['n_samples_d'] > 0:
                 z_vals = torch.linspace(self.config['cam']['near'], self.config['cam']['far'], self.config['training']['n_samples_d'])[None, :].repeat(n_rays, 1).to(rays_o)
                 z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
             else:
                 z_vals = z_samples
-        else:
+        else: # 没有  target_d
             z_vals = torch.linspace(self.config['cam']['near'], self.config['cam']['far'], self.config['training']['n_samples']).to(rays_o)
             z_vals = z_vals[None, :].repeat(n_rays, 1) # [n_rays, n_samples]
 
-        # Perturb sampling depths
+        # Perturb sampling depths 给深度加入噪音
         if self.config['training']['perturb'] > 0.:
             mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
             upper = torch.cat([mids, z_vals[...,-1:]], -1)
             lower = torch.cat([z_vals[...,:1], mids], -1)
             z_vals = lower + (upper - lower) * torch.rand(z_vals.shape).to(rays_o)
 
-        # Run rendering pipeline
+        # 将点输入到神经网络进行渲染
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
         raw = self.run_network(pts)
+        # TODO 更改返回
         rgb_map, disp_map, acc_map, weights, depth_map, depth_var = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
 
         # Importance sampling
+        # 默认不执行
         if self.config['training']['n_importance'] > 0:
 
             rgb_map_0, disp_map_0, acc_map_0, depth_map_0, depth_var_0 = rgb_map, disp_map, acc_map, depth_map, depth_var
@@ -283,6 +312,7 @@ class JointEncoding(nn.Module):
         rend_dict = self.render_rays(rays_o, rays_d, target_d=target_d)
 
         if not self.training:
+            #如果不在训练则直接返回
             return rend_dict
         
         # Get depth and rgb weights for loss
@@ -291,21 +321,23 @@ class JointEncoding(nn.Module):
         rgb_weight[rgb_weight==0] = self.config['training']['rgb_missing']
 
         # Get render loss
+        ## 1.  rgb_loss/depth_loss对应公式 6, 单纯的 L2 loss
         rgb_loss = compute_loss(rend_dict["rgb"]*rgb_weight, target_rgb*rgb_weight)
         psnr = mse2psnr(rgb_loss)
         depth_loss = compute_loss(rend_dict["depth"].squeeze()[valid_depth_mask], target_d.squeeze()[valid_depth_mask])
 
         if 'rgb0' in rend_dict:
+            #loss 会计算粗网络和细网络的和
             rgb_loss += compute_loss(rend_dict["rgb0"]*rgb_weight, target_rgb*rgb_weight)
             depth_loss += compute_loss(rend_dict["depth0"][valid_depth_mask], target_d.squeeze()[valid_depth_mask])
         
-        # Get sdf loss
+        ## 2. Get sdf loss/free space loss 公式七
         z_vals = rend_dict['z_vals']  # [N_rand, N_samples + N_importance]
         sdf = rend_dict['raw'][..., -1]  # [N_rand, N_samples + N_importance]
         truncation = self.config['training']['trunc'] * self.config['data']['sc_factor']
         fs_loss, sdf_loss = get_sdf_loss(z_vals, target_d, sdf, truncation, 'l2', grad=None)         
         
-
+        ## TODO 更改 loss
         ret = {
             "rgb": rend_dict["rgb"],
             "depth": rend_dict["depth"],

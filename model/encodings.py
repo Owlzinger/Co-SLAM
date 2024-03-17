@@ -70,7 +70,7 @@ def get_encoder(encoding, input_dim=3,
             )
         out_dim = embed.n_output_dims
     
-    # Frequency encoding
+    # Frequency encoding Nerf
     elif 'freq' in encoding.lower():
         print('Use frequency')
         embed = tcnn.Encoding(
