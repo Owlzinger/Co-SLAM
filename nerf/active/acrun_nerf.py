@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 from acrun_nerf_helpers import *
 
-from nerf.load_llff import load_llff_data
+# from nerf.load_llff import load_llff_data
 from acload_blender import load_blender_data
 import warnings
 
@@ -377,7 +377,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights,
         depth_map,
         uncert_map,
-        F.relu(raw[..., 3] + noise).mean(-1),
+        F.relu(raw[..., 3] + noise).mean(-1),# alpha_map
     )
 
 
@@ -811,34 +811,34 @@ def train():
     # Load data
 
     if args.dataset_type == "llff":
-        images, poses, bds, render_poses, i_test = load_llff_data(
-            args.datadir,
-            args.factor,
-            recenter=True,
-            bd_factor=0.75,
-            spherify=args.spherify,
-        )
-        hwf = poses[0, :3, -1]
-        poses = poses[:, :3, :4]
-        print("Loaded llff", images.shape, render_poses.shape, hwf, args.datadir)
-        if not isinstance(i_test, list):
-            i_test = [i_test]
-
-        if args.llffhold > 0:
-            print("Auto LLFF holdout,", args.llffhold)
-            i_test = np.arange(images.shape[0])[:: args.llffhold]
-
-        i_val = i_test
-        i_trainhold = np.array(
-            [
-                i
-                for i in np.arange(int(images.shape[0]))
-                if (i not in i_test and i not in i_val)
-            ]
-        )
-
-        i_holdout = i_trainhold[args.init_image:]
-        i_train = i_trainhold[: args.init_image]
+        # images, poses, bds, render_poses, i_test = load_llff_data(
+        #     args.datadir,
+        #     args.factor,
+        #     recenter=True,
+        #     bd_factor=0.75,
+        #     spherify=args.spherify,
+        # )
+        # hwf = poses[0, :3, -1]
+        # poses = poses[:, :3, :4]
+        # print("Loaded llff", images.shape, render_poses.shape, hwf, args.datadir)
+        # if not isinstance(i_test, list):
+        #     i_test = [i_test]
+        #
+        # if args.llffhold > 0:
+        #     print("Auto LLFF holdout,", args.llffhold)
+        #     i_test = np.arange(images.shape[0])[:: args.llffhold]
+        #
+        # i_val = i_test
+        # i_trainhold = np.array(
+        #     [
+        #         i
+        #         for i in np.arange(int(images.shape[0]))
+        #         if (i not in i_test and i not in i_val)
+        #     ]
+        # )
+        #
+        # i_holdout = i_trainhold[args.init_image:]
+        # i_train = i_trainhold[: args.init_image]
 
         print("DEFINING BOUNDS")
         if args.no_ndc:

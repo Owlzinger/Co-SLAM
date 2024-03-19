@@ -13,6 +13,7 @@ class SDFNet(nn.Module):
         self.geo_feat_dim = geo_feat_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.isActive = config['active']['isActive']
         self.model = self.get_model(tcnn_network=config['decoder']['tcnn_network'])
 
     def forward(self, x, return_geo=True):
@@ -48,8 +49,8 @@ class SDFNet(nn.Module):
                     in_dim = self.hidden_dim
 
                 if l == self.num_layers - 1:
-                    if self.config['active']['active']:
-                        out_dim = 1 + self.geo_feat_dim + 1   # 1 sigma + 15 SH features for color + 1 beta ---> 16
+                    if self.isActive:
+                        out_dim = 1 + self.geo_feat_dim + 1   # 1 sigma + 15 SH features for color + 1 beta/不确定度 ---> 17
                     else:
                         out_dim = 1 + self.geo_feat_dim
                 else:
@@ -141,7 +142,7 @@ class ColorSDFNet(nn.Module):
         else:
             h = self.sdf_net(embed, return_geo=True)
 
-        if config['active']['active']:
+        if self.isActive:
             sdf, geo_feat, beta = h[...,:1], h[...,1:-1], h[...,-1]
         else:
             sdf, geo_feat = h[...,:1], h[...,1:-1]
@@ -150,7 +151,7 @@ class ColorSDFNet(nn.Module):
             rgb = self.color_net(torch.cat([embed_pos, embed_color, geo_feat], dim=-1))
         else:
             rgb = self.color_net(torch.cat([embed_color, geo_feat], dim=-1))
-        if config['active']['active']:
+        if self.isActive:
             return torch.cat([rgb, sdf, beta], -1)
         else:
             return torch.cat([rgb, sdf], -1)
@@ -202,6 +203,8 @@ class ColorSDFNet_v3(nn.Module):
     def __init__(self, config, input_ch=3, input_ch_pos=12):
         super(ColorSDFNet_v3, self).__init__()
         self.config = config
+        self.beta_min = self.config['active']['beta_min']
+        self.isActive = self.config['active']['isActive']
         self.sdf_net = SDFNet(config,
                 input_ch=input_ch+input_ch_pos,
                 geo_feat_dim=config['decoder']['geo_feat_dim'],
@@ -224,7 +227,7 @@ class ColorSDFNet_v3(nn.Module):
             h = self.sdf_net(embed, return_geo=True) 
 
         sdf, geo_feat, beta = h[...,:1], h[...,1:-1], h[...,-1]
-        beta = beta.unsqueeze(-1)
+        beta = beta.unsqueeze(-1)+self.beta_min
         if embed_pos is not None:
             rgb = self.color_net(torch.cat([embed_pos, geo_feat], dim=-1))
         else:

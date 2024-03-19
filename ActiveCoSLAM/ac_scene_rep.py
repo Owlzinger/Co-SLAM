@@ -7,6 +7,7 @@ from model.encodings import get_encoder
 from ActiveCoSLAM.ac_decoder import ColorSDFNet, ColorSDFNet_v3
 from model.utils import sample_pdf, batchify, get_sdf_loss, mse2psnr, compute_loss
 
+
 class JointEncoding(nn.Module):
     def __init__(self, config, bound_box):
         super(JointEncoding, self).__init__()
@@ -18,6 +19,10 @@ class JointEncoding(nn.Module):
         # 2. coordinate encoding用OneBlob
         self.get_encoding(config)
         self.get_decoder(config)
+        self.w=self.config['active']['w']
+        self.img2mse_uncert_alpha = lambda x, y, uncert, alpha, w: torch.mean(
+            (1 / (2 * (uncert + 1e-9).unsqueeze(-1))) * ((x - y) ** 2)) + 0.5 * torch.mean(
+            torch.log(uncert + 1e-9)) + w * alpha.mean() + 4.0
         
 
     def get_resolution(self):
@@ -78,6 +83,7 @@ class JointEncoding(nn.Module):
     def sdf2weights(self, sdf, z_vals, args=None):
         '''
         Convert signed distance function to weights.
+        没动
 
         Params:
             sdf: [N_rays, N_samples]
@@ -100,7 +106,7 @@ class JointEncoding(nn.Module):
     def raw2outputs(self, raw, z_vals, white_bkgd=False):
         '''
         Perform volume rendering using weights computed from sdf.
-
+        改了:
         Params:
             raw: [N_rays, N_samples, 4]
             z_vals: [N_rays, N_samples]
@@ -109,10 +115,14 @@ class JointEncoding(nn.Module):
             disp_map: [N_rays]
             acc_map: [N_rays]
             weights: [N_rays, N_samples]
+            uncert_map: [N_rays,N_samples]
         '''
-        rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+        rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 5]
+        uncert=torch.nn.functional.softplus(raw[...,-1])
+        # raw的最后一列是不确定度, unsqueeze(-1)是为了和rgb的维度对齐,softplus是为了保证不确定度是正数
         weights = self.sdf2weights(raw[..., 3], z_vals, args=self.config)
         rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+        uncert_map = torch.sum(weights * weights * uncert, -1)
 
         depth_map = torch.sum(weights * z_vals, -1)
         depth_var = torch.sum(weights * torch.square(z_vals - depth_map.unsqueeze(-1)), dim=-1)
@@ -122,8 +132,8 @@ class JointEncoding(nn.Module):
         if white_bkgd:
             rgb_map = rgb_map + (1.-acc_map[...,None])
 
-        return rgb_map, disp_map, acc_map, weights, depth_map, depth_var
-    
+        return rgb_map, disp_map, acc_map, weights, depth_map, depth_var,uncert_map
+
     def query_sdf(self, query_points, return_geo=False, embed=False):
         '''
         Get the SDF value of the query points
@@ -141,32 +151,32 @@ class JointEncoding(nn.Module):
 
         embedded_pos = self.embedpos_fn(inputs_flat)
         out = self.sdf_net(torch.cat([embedded, embedded_pos], dim=-1))
-        sdf, geo_feat = out[..., :1], out[..., 1:]
+        sdf, geo_feat, beta = out[..., :1], out[..., 1:-1], out[..., -1]
 
         sdf = torch.reshape(sdf, list(query_points.shape[:-1]))
         if not return_geo:
-            return sdf
+            return sdf, beta
         geo_feat = torch.reshape(geo_feat, list(query_points.shape[:-1]) + [geo_feat.shape[-1]])
 
-        return sdf, geo_feat
+        return sdf, geo_feat,beta
     
     def query_color(self, query_points):
-        return torch.sigmoid(self.query_color_sdf(query_points)[..., :3])
+        return torch.sigmoid(self.query_color_sdf_beta(query_points)[..., :3])
       
-    def query_color_sdf(self, query_points):
+    def query_color_sdf_beta(self, query_points):
         '''
-        Query the color and sdf at query_points.
+        Query the color and sdf and beta at query_points.
 
         Params:
             query_points: [N_rays, N_samples, 3]
         Returns:
-            raw: [N_rays, N_samples, 4]
+            raw: [N_rays, N_samples, 5]
         '''
         inputs_flat = torch.reshape(query_points, [-1, query_points.shape[-1]])
 
         embed = self.embed_fn(inputs_flat)
         embe_pos = self.embedpos_fn(inputs_flat)
-        if not self.config['grid']['oneGrid']:
+        if not self.config['grid']['oneGrid']: #不走这里
             embed_color = self.embed_fn_color(inputs_flat)
             return self.decoder(embed, embe_pos, embed_color)
         return self.decoder(embed, embe_pos)
@@ -186,10 +196,10 @@ class JointEncoding(nn.Module):
         if self.config['grid']['tcnn_encoding']:
             inputs_flat = (inputs_flat - self.bounding_box[:, 0]) / (self.bounding_box[:, 1] - self.bounding_box[:, 0])
 
-        outputs_flat = batchify(self.query_color_sdf, None)(inputs_flat)
+        outputs_flat = batchify(self.query_color_sdf_beta, None)(inputs_flat)
         outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
 
-        return outputs
+        return outputs # 2048*85*5
     
     def render_surface_color(self, rays_o, normal):
         '''
@@ -206,7 +216,7 @@ class JointEncoding(nn.Module):
         
         pts = rays_o[...,:] + normal[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
         raw = self.run_network(pts)
-        rgb, disp_map, acc_map, weights, depth_map, depth_var = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
+        rgb, disp_map, acc_map, weights, depth_map, depth_var,uncert_map = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
         return rgb
     
     def render_rays(self, rays_o, rays_d, target_d=None):
@@ -258,14 +268,13 @@ class JointEncoding(nn.Module):
         # 将点输入到神经网络进行渲染
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
         raw = self.run_network(pts)
-        # TODO 更改返回
-        rgb_map, disp_map, acc_map, weights, depth_map, depth_var = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
+        rgb_map, disp_map, acc_map, weights, depth_map, depth_var,uncert_map = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
 
         # Importance sampling
         # 默认不执行
         if self.config['training']['n_importance'] > 0:
 
-            rgb_map_0, disp_map_0, acc_map_0, depth_map_0, depth_var_0 = rgb_map, disp_map, acc_map, depth_map, depth_var
+            rgb_map_0, disp_map_0, acc_map_0, depth_map_0, depth_var_0,uncert_map0 = rgb_map, disp_map, acc_map, depth_map, depth_var,uncert_map
 
             z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
             z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], self.config['training']['n_importance'], det=(self.config['training']['perturb']==0.))
@@ -275,12 +284,16 @@ class JointEncoding(nn.Module):
             pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
 
             raw = self.run_network(pts)
-            rgb_map, disp_map, acc_map, weights, depth_map, depth_var = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
+            rgb_map, disp_map, acc_map, weights, depth_map, depth_var,uncert_map = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
 
         # Return rendering outputs
-        ret = {'rgb' : rgb_map, 'depth' :depth_map, 
-               'disp_map' : disp_map, 'acc_map' : acc_map, 
-               'depth_var':depth_var,}
+        ret = {'rgb' : rgb_map,
+               'depth' :depth_map,
+               'disp_map' : disp_map,
+               'acc_map' : acc_map,
+               'depth_var':depth_var,
+                'uncert_map':uncert_map,
+               }
         ret = {**ret, 'z_vals': z_vals}
 
         ret['raw'] = raw
@@ -292,6 +305,7 @@ class JointEncoding(nn.Module):
             ret['depth0'] = depth_map_0
             ret['depth_var0'] = depth_var_0
             ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)
+            ret['uncert_map0'] = uncert_map0
 
         return ret
     
@@ -320,16 +334,24 @@ class JointEncoding(nn.Module):
         valid_depth_mask = (target_d.squeeze() > 0.) * (target_d.squeeze() < self.config['cam']['depth_trunc'])
         rgb_weight = valid_depth_mask.clone().unsqueeze(-1)
         rgb_weight[rgb_weight==0] = self.config['training']['rgb_missing']
-
+        uncert= rend_dict['uncert_map']
         # Get render loss
         ## 1.  rgb_loss/depth_loss对应公式 6, 单纯的 L2 loss
-        rgb_loss = compute_loss(rend_dict["rgb"]*rgb_weight, target_rgb*rgb_weight)
+        ## TODO 怎么求 alpha
+        ## 由于没有 alpha 信息,所以令 alpha=0
+        alpha = torch.zeros_like(uncert.unsqueeze(-1))
+        if uncert.min() > 0:
+            # leave alpha as 0
+            rgb_loss = self.img2mse_uncert_alpha(rend_dict["rgb"]*rgb_weight, target_rgb*rgb_weight, uncert, alpha, self.w)
+        else:
+            rgb_loss = compute_loss(rend_dict["rgb"]*rgb_weight, target_rgb*rgb_weight)
+
         psnr = mse2psnr(rgb_loss)
         depth_loss = compute_loss(rend_dict["depth"].squeeze()[valid_depth_mask], target_d.squeeze()[valid_depth_mask])
 
         if 'rgb0' in rend_dict:
-            #loss 会计算粗网络和细网络的和
-            rgb_loss += compute_loss(rend_dict["rgb0"]*rgb_weight, target_rgb*rgb_weight)
+            #rgb_loss 计算粗网络和细网络的和
+            rgb_loss += compute_loss(rend_dict["rgb0"]*rgb_weight, target_rgb*rgb_weight) #粗网络的 rbg_loss加到精网络上
             depth_loss += compute_loss(rend_dict["depth0"][valid_depth_mask], target_d.squeeze()[valid_depth_mask])
         
         ## 2. Get sdf loss/free space loss 公式七
