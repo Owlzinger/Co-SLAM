@@ -21,9 +21,14 @@ def coordinates(voxel_dim, device: torch.device, flatten=True):
         return torch.stack([x, y, z], dim=-1)
 
     return torch.stack((x.flatten(), y.flatten(), z.flatten()))
+
+
 #### ####
 
-def getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolution=None):
+
+def getVoxels(
+    x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolution=None
+):
 
     if not isinstance(x_max, float):
         x_max = float(x_max)
@@ -32,7 +37,7 @@ def getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolut
         y_min = float(y_min)
         z_max = float(z_max)
         z_min = float(z_min)
-    
+
     if voxel_size is not None:
         Nx = round((x_max - x_min) / voxel_size + 0.0005)
         Ny = round((y_max - y_min) / voxel_size + 0.0005)
@@ -43,28 +48,41 @@ def getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolut
         tz = torch.linspace(z_min, z_max, Nz + 1)
     else:
         tx = torch.linspace(x_min, x_max, resolution)
-        ty = torch.linspace(y_min, y_max,resolution)
+        ty = torch.linspace(y_min, y_max, resolution)
         tz = torch.linspace(z_min, z_max, resolution)
 
-
     return tx, ty, tz
+
 
 def get_batch_query_fn(query_fn, num_args=1, device=None):
 
     if num_args == 1:
         fn = lambda f, i0, i1: query_fn(f[i0:i1, None, :].to(device))
     else:
-        fn = lambda f, f1, i0, i1: query_fn(f[i0:i1, None, :].to(device), f1[i0:i1, :].to(device))
-
+        fn = lambda f, f1, i0, i1: query_fn(
+            f[i0:i1, None, :].to(device), f1[i0:i1, :].to(device)
+        )
 
     return fn
 
+
 #### NeuralRGBD ####
 @torch.no_grad()
-def extract_mesh(query_fn, config, bounding_box, marching_cube_bound=None, color_func = None, voxel_size=None, resolution=None, isolevel=0.0, scene_name='', mesh_savepath=''):
-    '''
+def extract_mesh(
+    query_fn,
+    config,
+    bounding_box,
+    marching_cube_bound=None,
+    color_func=None,
+    voxel_size=None,
+    resolution=None,
+    isolevel=0.0,
+    scene_name="",
+    mesh_savepath="",
+):
+    """
     Extracts mesh from the scene model using marching cubes (Adapted from NeuralRGBD)
-    '''
+    """
     # Query network on dense 3d grid of points
     if marching_cube_bound is None:
         marching_cube_bound = bounding_box
@@ -72,29 +90,37 @@ def extract_mesh(query_fn, config, bounding_box, marching_cube_bound=None, color
     x_min, y_min, z_min = marching_cube_bound[:, 0]
     x_max, y_max, z_max = marching_cube_bound[:, 1]
 
-    tx, ty, tz = getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size, resolution)
-    query_pts = torch.stack(torch.meshgrid(tx, ty, tz, indexing='ij'), -1).to(torch.float32)
+    tx, ty, tz = getVoxels(
+        x_max, x_min, y_max, y_min, z_max, z_min, voxel_size, resolution
+    )
+    query_pts = torch.stack(torch.meshgrid(tx, ty, tz, indexing="ij"), -1).to(
+        torch.float32
+    )
 
-    
     sh = query_pts.shape
     flat = query_pts.reshape([-1, 3])
     bounding_box_cpu = bounding_box.cpu()
 
-    if config['grid']['tcnn_encoding']:
-        flat = (flat - bounding_box_cpu[:, 0]) / (bounding_box_cpu[:, 1] - bounding_box_cpu[:, 0])
+    if config["grid"]["tcnn_encoding"]:
+        flat = (flat - bounding_box_cpu[:, 0]) / (
+            bounding_box_cpu[:, 1] - bounding_box_cpu[:, 0]
+        )
 
     fn = get_batch_query_fn(query_fn, device=bounding_box.device)
 
     chunk = 1024 * 64
-    raw = [fn(flat, i, i + chunk).cpu().data.numpy() for i in range(0, flat.shape[0], chunk)]
-    
+    # 由于多返回了一个 beta,所以这里 raw 有问题和 JointEncoding 有关
+    raw = [
+        fn(flat, i, i + chunk).cpu().data.numpy()
+        for i in range(0, flat.shape[0], chunk)
+    ]
+
     raw = np.concatenate(raw, 0).astype(np.float32)
     raw = np.reshape(raw, list(sh[:-1]) + [-1])
-    
 
-    print('Running Marching Cubes')
+    print("Running Marching Cubes")
     vertices, triangles = mcubes.marching_cubes(raw.squeeze(), isolevel, truncation=3.0)
-    print('done', vertices.shape, triangles.shape)
+    print("done", vertices.shape, triangles.shape)
 
     # normalize vertex positions
     vertices[:, :3] /= np.array([[tx.shape[0] - 1, ty.shape[0] - 1, tz.shape[0] - 1]])
@@ -103,40 +129,50 @@ def extract_mesh(query_fn, config, bounding_box, marching_cube_bound=None, color
     tx = tx.cpu().data.numpy()
     ty = ty.cpu().data.numpy()
     tz = tz.cpu().data.numpy()
-    
+
     scale = np.array([tx[-1] - tx[0], ty[-1] - ty[0], tz[-1] - tz[0]])
     offset = np.array([tx[0], ty[0], tz[0]])
     vertices[:, :3] = scale[np.newaxis, :] * vertices[:, :3] + offset
 
     # Transform to metric units
-    vertices[:, :3] = vertices[:, :3] / config['data']['sc_factor'] - config['data']['translation']
+    vertices[:, :3] = (
+        vertices[:, :3] / config["data"]["sc_factor"] - config["data"]["translation"]
+    )
 
-
-    if color_func is not None and not config['mesh']['render_color']:
-        if config['grid']['tcnn_encoding']:
-            vert_flat = (torch.from_numpy(vertices).to(bounding_box) - bounding_box[:, 0]) / (bounding_box[:, 1] - bounding_box[:, 0])
-
+    if color_func is not None and not config["mesh"]["render_color"]:
+        if config["grid"]["tcnn_encoding"]:
+            vert_flat = (
+                torch.from_numpy(vertices).to(bounding_box) - bounding_box[:, 0]
+            ) / (bounding_box[:, 1] - bounding_box[:, 0])
 
         fn_color = get_batch_query_fn(color_func, 1)
 
         chunk = 1024 * 64
-        raw = [fn_color(vert_flat,  i, i + chunk).cpu().data.numpy() for i in range(0, vert_flat.shape[0], chunk)]
+        raw = [
+            fn_color(vert_flat, i, i + chunk).cpu().data.numpy()
+            for i in range(0, vert_flat.shape[0], chunk)
+        ]
 
         sh = vert_flat.shape
-        
+
         raw = np.concatenate(raw, 0).astype(np.float32)
         color = np.reshape(raw, list(sh[:-1]) + [-1])
         mesh = trimesh.Trimesh(vertices, triangles, process=False, vertex_colors=color)
-    
-    elif color_func is not None and config['mesh']['render_color']:
-        print('rendering surface color')
+
+    elif color_func is not None and config["mesh"]["render_color"]:
+        print("rendering surface color")
         mesh = trimesh.Trimesh(vertices, triangles, process=False)
         vertex_normals = torch.from_numpy(mesh.vertex_normals)
         fn_color = get_batch_query_fn(color_func, 2, device=bounding_box.device)
-        raw = [fn_color(torch.from_numpy(vertices), vertex_normals,  i, i + chunk).cpu().data.numpy() for i in range(0, vertices.shape[0], chunk)]
+        raw = [
+            fn_color(torch.from_numpy(vertices), vertex_normals, i, i + chunk)
+            .cpu()
+            .data.numpy()
+            for i in range(0, vertices.shape[0], chunk)
+        ]
 
         sh = vertex_normals.shape
-        
+
         raw = np.concatenate(raw, 0).astype(np.float32)
         color = np.reshape(raw, list(sh[:-1]) + [-1])
         mesh = trimesh.Trimesh(vertices, triangles, process=False, vertex_colors=color)
@@ -145,24 +181,26 @@ def extract_mesh(query_fn, config, bounding_box, marching_cube_bound=None, color
         # Create mesh
         mesh = trimesh.Trimesh(vertices, triangles, process=False)
 
-    
     os.makedirs(os.path.split(mesh_savepath)[0], exist_ok=True)
     mesh.export(mesh_savepath)
 
-    print('Mesh saved')
+    print("Mesh saved")
     return mesh
-#### #### 
+
+
+#### ####
+
 
 #### SimpleRecon ####
 def colormap_image(
-        image_1hw,
-        mask_1hw=None,
-        invalid_color=(0.0, 0, 0.0),
-        flip=True,
-        vmin=None,
-        vmax=None,
-        return_vminvmax=False,
-        colormap="turbo",
+    image_1hw,
+    mask_1hw=None,
+    invalid_color=(0.0, 0, 0.0),
+    flip=True,
+    vmin=None,
+    vmax=None,
+    return_vminvmax=False,
+    colormap="turbo",
 ):
     """
     Colormaps a one channel tensor using a matplotlib colormap.
@@ -187,11 +225,9 @@ def colormap_image(
     if vmax is None:
         vmax = valid_vals.max()
 
-    cmap = torch.Tensor(
-        plt.cm.get_cmap(colormap)(
-            torch.linspace(0, 1, 256)
-        )[:, :3]
-    ).to(image_1hw.device)
+    cmap = torch.Tensor(plt.cm.get_cmap(colormap)(torch.linspace(0, 1, 256))[:, :3]).to(
+        image_1hw.device
+    )
     if flip:
         cmap = torch.flip(cmap, (0,))
 
@@ -200,8 +236,9 @@ def colormap_image(
     image_norm_1hw = (image_1hw - vmin) / (vmax - vmin)
     image_int_1hw = (torch.clamp(image_norm_1hw * 255, 0, 255)).byte().long()
 
-    image_cm_3hw = cmap[image_int_1hw.flatten(start_dim=1)
-    ].permute([0, 2, 1]).view([-1, h, w])
+    image_cm_3hw = (
+        cmap[image_int_1hw.flatten(start_dim=1)].permute([0, 2, 1]).view([-1, h, w])
+    )
 
     if mask_1hw is not None:
         invalid_color = torch.Tensor(invalid_color).view(3, 1, 1).to(image_1hw.device)
@@ -211,8 +248,3 @@ def colormap_image(
         return image_cm_3hw, vmin, vmax
     else:
         return image_cm_3hw
-
-
-
-
-
