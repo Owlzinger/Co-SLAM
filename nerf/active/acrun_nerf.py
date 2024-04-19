@@ -1,15 +1,10 @@
-import os, sys
+import os
 import numpy as np
 import imageio
-import json
-import random
 import time
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
-
-import matplotlib.pyplot as plt
 
 from acrun_nerf_helpers import *
 
@@ -37,7 +32,7 @@ def batchify(fn, chunk):
     return ret
 
 
-def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64):
+def run_network(inputgs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64):
     """Prepares inputs and applies network 'fn'."""
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
@@ -377,7 +372,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights,
         depth_map,
         uncert_map,
-        F.relu(raw[..., 3] + noise).mean(-1),# alpha_map
+        F.relu(raw[..., 3] + noise).mean(-1),  # alpha_map
     )
 
 

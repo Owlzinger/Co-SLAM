@@ -1,4 +1,4 @@
-dataset: 'tum'
+angledataset: 'tum'
 
 data:
   downsample: 1
@@ -59,9 +59,9 @@ decoder:
   hidden_dim_color: 32
   tcnn_network: False
 
-cam:  #NOTE: intrinsic is different per scene in TUM
-  H: 480 
-  W: 640 
+cam: #NOTE: intrinsic is different per scene in TUM
+  H: 480
+  W: 640
   fx: 517.3
   fy: 516.5
   cx: 318.6
