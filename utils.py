@@ -27,9 +27,8 @@ def coordinates(voxel_dim, device: torch.device, flatten=True):
 
 
 def getVoxels(
-    x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolution=None
+        x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolution=None
 ):
-
     if not isinstance(x_max, float):
         x_max = float(x_max)
         x_min = float(x_min)
@@ -55,9 +54,18 @@ def getVoxels(
 
 
 def get_batch_query_fn(query_fn, num_args=1, device=None):
-
+    """
+    函数返回 lambda 函数
+    当 num_args 为 1 时，返回一个参数的 lambda 函数；当 num_args 大于 1 时，返回两个参数的 lambda 函数
+    这些 lambda 函数都会调用传入的 query_fn 函数，并根据索引 i0 和 i1 以及设备 device 将输入的数据进行切片处理。
+    """
     if num_args == 1:
-        fn = lambda f, i0, i1: query_fn(f[i0:i1, None, :].to(device))
+        # query_fn: query_sdf(query_points)
+        # f 对应外面的flat变量1917971,3
+        # coslam
+        # i0 = {int} 393216
+        # i1 = {int} 458752
+        fn = lambda f, i0, i1: query_fn(f[i0:i1, None, :].to(device))  # noqa: E731
     else:
         fn = lambda f, f1, i0, i1: query_fn(
             f[i0:i1, None, :].to(device), f1[i0:i1, :].to(device)
@@ -69,16 +77,16 @@ def get_batch_query_fn(query_fn, num_args=1, device=None):
 #### NeuralRGBD ####
 @torch.no_grad()
 def extract_mesh(
-    query_fn,
-    config,
-    bounding_box,
-    marching_cube_bound=None,
-    color_func=None,
-    voxel_size=None,
-    resolution=None,
-    isolevel=0.0,
-    scene_name="",
-    mesh_savepath="",
+        query_fn,  # self.model.query_sdf
+        config,
+        bounding_box,
+        marching_cube_bound=None,
+        color_func=None,
+        voxel_size=None,
+        resolution=None,
+        isolevel=0.0,
+        scene_name="",
+        mesh_savepath="",
 ):
     """
     Extracts mesh from the scene model using marching cubes (Adapted from NeuralRGBD)
@@ -103,17 +111,21 @@ def extract_mesh(
 
     if config["grid"]["tcnn_encoding"]:
         flat = (flat - bounding_box_cpu[:, 0]) / (
-            bounding_box_cpu[:, 1] - bounding_box_cpu[:, 0]
+                bounding_box_cpu[:, 1] - bounding_box_cpu[:, 0]
         )
 
     fn = get_batch_query_fn(query_fn, device=bounding_box.device)
 
     chunk = 1024 * 64
     # 由于多返回了一个 beta,所以这里 raw 有问题和 JointEncoding 有关
-    raw = [
-        fn(flat, i, i + chunk).cpu().data.numpy()
-        for i in range(0, flat.shape[0], chunk)
-    ]
+    # fn = get_batch_query_fn(query_fn, device=bounding_box.device)
+    # query_fn对应self.model.query_sdf函数,
+    # 替换：get_batch_query_fn(self.model.query_sdf())
+
+    # for i in range(0, flat.shape[0], chunk):
+    # temp = fn(flat, i, i + chunk)
+    # print(i)
+    raw = [fn(flat, i, i + chunk).cpu().data.numpy() for i in range(0, flat.shape[0], chunk)]
 
     raw = np.concatenate(raw, 0).astype(np.float32)
     raw = np.reshape(raw, list(sh[:-1]) + [-1])
@@ -136,14 +148,14 @@ def extract_mesh(
 
     # Transform to metric units
     vertices[:, :3] = (
-        vertices[:, :3] / config["data"]["sc_factor"] - config["data"]["translation"]
+            vertices[:, :3] / config["data"]["sc_factor"] - config["data"]["translation"]
     )
 
     if color_func is not None and not config["mesh"]["render_color"]:
         if config["grid"]["tcnn_encoding"]:
             vert_flat = (
-                torch.from_numpy(vertices).to(bounding_box) - bounding_box[:, 0]
-            ) / (bounding_box[:, 1] - bounding_box[:, 0])
+                                torch.from_numpy(vertices).to(bounding_box) - bounding_box[:, 0]
+                        ) / (bounding_box[:, 1] - bounding_box[:, 0])
 
         fn_color = get_batch_query_fn(color_func, 1)
 
@@ -193,14 +205,14 @@ def extract_mesh(
 
 #### SimpleRecon ####
 def colormap_image(
-    image_1hw,
-    mask_1hw=None,
-    invalid_color=(0.0, 0, 0.0),
-    flip=True,
-    vmin=None,
-    vmax=None,
-    return_vminvmax=False,
-    colormap="turbo",
+        image_1hw,
+        mask_1hw=None,
+        invalid_color=(0.0, 0, 0.0),
+        flip=True,
+        vmin=None,
+        vmax=None,
+        return_vminvmax=False,
+        colormap="turbo",
 ):
     """
     Colormaps a one channel tensor using a matplotlib colormap.
