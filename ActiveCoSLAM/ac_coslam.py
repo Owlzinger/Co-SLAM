@@ -1,7 +1,7 @@
 import os
 
 # os.environ['TCNN_CUDA_ARCHITECTURES'] = '86'
-
+import time
 # Package imports
 import torch
 import torch.optim as optim
@@ -14,17 +14,19 @@ import json
 import cv2
 
 from torch.utils.data import DataLoader
+# from tqdm import tqdm
 from tqdm import tqdm
+from tqdm.rich import trange
 
 # Local imports
 import config
 
 from ActiveCoSLAM.ac_scene_rep import JointEncoding
 from ActiveCoSLAM.information_gain import choose_new_k, get_rays_np
+from ActiveCoSLAM.ac_dataset import get_dataset
 
 # from model.scene_rep import JointEncoding
 from model.keyframe import KeyFrameDatabase
-from datasets.dataset import get_dataset
 from utils import coordinates, extract_mesh, colormap_image
 from tools.eval_ate import pose_evaluation
 from optimization.utils import (
@@ -40,12 +42,13 @@ class CoSLAM:
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dataset = get_dataset(config)
-
         self.create_bounds()
         self.create_pose_data()
         self.get_pose_representation()
-        self.keyframeDatabase = self.create_kf_database(config)
+        self.keyframeDatabase = self.create_kf_database(config)  # 初始化关键帧数据库 长度 119
+
         self.model = JointEncoding(config, self.bounding_box).to(self.device)
+        self.downsample_rate = self.config["active"]["downsample_rate"]
 
     def seed_everything(self, seed):
         random.seed(seed)
@@ -84,23 +87,24 @@ class CoSLAM:
         """
         Get the pre-defined bounds for the scene
         """
-        self.bounding_box = torch.from_numpy(
-            np.array(self.config["mapping"]["bound"])
-        ).to(self.device)
-        self.marching_cube_bound = torch.from_numpy(
-            np.array(self.config["mapping"]["marching_cubes_bound"])
-        ).to(self.device)
+        self.bounding_box = torch.from_numpy(np.array(self.config['mapping']['bound'])).to(self.device)
+        self.marching_cube_bound = torch.from_numpy(np.array(self.config['mapping']['marching_cubes_bound'])).to(
+            self.device)
 
     def create_kf_database(self, config):
         """
         Create the keyframe database
         """
         num_kf = int(
+            # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧
+            # self.dataset.num_frames = 592
+            # +1 应该是第一帧
+
             self.dataset.num_frames // self.config["mapping"]["keyframe_every"] + 1
         )
-        print("#kf:", num_kf)
+        print("#kf: ", num_kf)
         # num_rays_to_save= total pixel *  5% (下采样)
-        print("#Pixels to save:", self.dataset.num_rays_to_save)
+        print("#Pixels to save: ", self.dataset.num_rays_to_save)
         return KeyFrameDatabase(
             config,
             self.dataset.H,
@@ -194,18 +198,30 @@ class CoSLAM:
             loss: float
 
         """
+        # ********************* 读取第0帧的相机位姿 *********************
+
         print("First frame mapping...")
         c2w = batch["c2w"][0].to(self.device)
-        self.est_c2w_data[0] = c2w
-        self.est_c2w_data_rel[0] = c2w
+        self.est_c2w_data[0] = c2w  # [4,4]
+        self.est_c2w_data_rel[0] = c2w  # 第0帧的观测位姿 直接作为 位姿估计
 
         self.model.train()
+        # 如果模型中有BN层(Batch Normalization）和Dropout，需要在训练时添加model.train()，在测试时添加model.eval()。
+        # 对于BN层: 
+        # model.train()是保证BN层用每一批数据的均值和方差
+        # model.eval()是保证BN用全部训练数据的均值和方差；
+        # 对于Dropout:
+        # model.train()是随机取一部分网络连接来训练更新参数，
+        # model.eval()是利用到了所有网络连接。
 
         # Training
-        for i in range(n_iters):  # 1000
+        for i in trange(n_iters):  # 1000
+            # ********************* 获得第0帧每个像素的颜色，深度，方向 *********************
+            # print(f"\r{i}/{n_iters}", end="")
+
             self.map_optimizer.zero_grad()
             indice = self.select_samples(
-                # 图像 H*W 368*496, samples=2048
+                # 从一个范围内的整数（0 到 H * W - 1）中随机选择samples=2048个样本像素
                 # indice就是从 0 到 182528 之间随机选取 2048 个数作为 index
                 self.dataset.H,
                 self.dataset.W,
@@ -213,30 +229,35 @@ class CoSLAM:
             )
             # 每个像素在图像上的位置索引
             indice_h, indice_w = indice % (self.dataset.H), indice // (self.dataset.H)
-            # batch["direction"].squeeze(0) 368*496*3
-            # target_* : Ground truth?
-            rays_d_cam = (
-                batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device)
-            )
+            # 计算的是每个索引在高度（行）方向上的位置，即行索引indice_h。 
+            # 得到每个采样得到的像素的h,w值[2048]
+            rays_d_cam = (batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device))
+            # 得到每个样本像素的方向，作为目标射线方向    [2048,3]
             target_s = batch["rgb"].squeeze(0)[indice_h, indice_w, :].to(self.device)
-            target_d = (
-                batch["depth"]
-                .squeeze(0)[indice_h, indice_w]
-                .to(self.device)
-                .unsqueeze(-1)
-            )
+            # 得到每个样本像素的颜色，作为目标颜色        [2048.3]
+            target_d = (batch["depth"].squeeze(0)[indice_h, indice_w].to(self.device).unsqueeze(
+                -1))
+            # 得到每个样本像素的深度，作为目标深度        [2048,1]
 
             rays_o = c2w[None, :3, -1].repeat(self.config["mapping"]["sample"], 1)
+            # 世界坐标系下的射线原点，即变换矩阵的t，即相机位置 [2048,3]
             rays_d = torch.sum(rays_d_cam[..., None, :] * c2w[:3, :3], -1)
+            # rays_d_cam[..., None, :] 相机坐标系中的射线方向： [2048,1,3]
+            # c2w[:3, :3] : 旋转矩阵    [3,3]
+            # sum(x,-1) 在最后一个维度上进行求和
 
             # Forward
+            # ********************* 前向传播: 得到rgb图，深度图，rgb损失，深度损失,sdf损失，fs损失 *********************
+
             ret = self.model.forward(rays_o, rays_d, target_s, target_d)
             loss = self.get_loss_from_ret(ret)
+            # ********************* 反响传播: 优化encoder/decoder网络的参数 *********************
+
             loss.backward()
             self.map_optimizer.step()
 
         # First frame will always be a keyframe
-        # 第一帧一定是关键帧,为了建立参考点
+        # ********************* 将当前帧加入关键帧 *********************
         self.keyframeDatabase.add_keyframe(
             batch, filter_depth=self.config["mapping"]["filter_depth"]
         )
@@ -264,6 +285,7 @@ class CoSLAM:
             # 所以current_frame_mapping不会执行
             return
         print("Current frame mapping...")
+        # ********************* 读取当前帧的位姿估计 *********************
 
         c2w = self.est_c2w_data[cur_frame_id].to(self.device)
 
@@ -773,7 +795,7 @@ class CoSLAM:
             self.est_c2w_data_rel[frame_id] = delta
 
         print(
-            "Best loss: {}, Last loss{}".format(
+            "Best loss: {:.4f}, Last loss: {:.4f}".format(
                 F.l1_loss(best_c2w_est.to(self.device)[0, :3], c2w_gt[:3]).cpu().item(),
                 F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
             )
@@ -864,13 +886,39 @@ class CoSLAM:
 
     def run(self):
         self.create_optimizer()
-        data_loader = DataLoader(  # 592张图片
-            self.dataset, num_workers=self.config["data"]["num_workers"]
-        )
+        dataset_size = len(self.dataset)
+        # 我想将 self.dataset 中的数据的前百分之 25的图片保存为训练集
+        # 后百分之 75的图片保存为验证集
 
-        # Start Co-SLAM!
-        for i, batch in tqdm(enumerate(data_loader)):
-            # Visualisation
+        train_size = int(0.3 * dataset_size)  # 前百分之 30的图片作为训练集
+        holdout_size = dataset_size - train_size  # 后百分之 70的图片作为保留集
+        # 按顺序划分
+        train_dataset = torch.utils.data.Subset(self.dataset, range(0, train_size))
+        holdout_dataset = torch.utils.data.Subset(self.dataset, range(train_size, dataset_size))
+
+        all_data_loader = DataLoader(self.dataset, num_workers=self.config["data"]["num_workers"])
+        train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
+        validation_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
+        i_train = train_dataset.indices
+        i_holdout = holdout_dataset.indices
+
+        all_images = []
+        for batch in all_data_loader:
+            all_images.append(batch['rgb'].detach().cpu().numpy())  # 确保只在CPU上操作，避免GPU溢出
+            # Start Co-SLAM!
+        all_images = np.concatenate(all_images, axis=0)  # 最后再进行一次合并
+        all_images = torch.Tensor(all_images).to(self.device)
+
+        for i, batch in tqdm(enumerate(train_loader)):
+            # batch = {
+            # 'frame_id': [1],
+            # 'c2w': [1, 4, 4],
+            # 'rgb': [1, H, W, 3], 1*368*496*3
+            # 'depth': [1, H, W, 1], 1*368*496
+            # 'direction': [1, H, W, 3] 1*368*496*3
+            # }
+
+            # ******** Visualisation *************
             if self.config["mesh"]["visualisation"]:
                 rgb = cv2.cvtColor(
                     batch["rgb"].squeeze().cpu().numpy(), cv2.COLOR_BGR2RGB
@@ -888,13 +936,6 @@ class CoSLAM:
             # First frame mapping
             # *******建立初始的地图和位姿估计********
             if i == 0:
-                # batch = {
-                # 'frame_id': [1],
-                # 'c2w': [1, 4, 4],
-                # 'rgb': [1, H, W, 3], 1*368*496*3
-                # 'depth': [1, H, W, 1], 1*368*496
-                # 'direction': [1, H, W, 3] 1*368*496*3
-                # }
                 self.first_frame_mapping(
                     batch, self.config["mapping"]["first_iters"]
                 )  # first_iters=1000
@@ -903,7 +944,7 @@ class CoSLAM:
             # Tracking + Mapping
             else:
                 # ***************** Tracking*****************
-                if self.config["tracking"]["iter_point"] > 0:
+                if self.config["tracking"]["iter_point"] > 0:  # 代码中是 False
                     # *****通过点云来跟踪当前帧的相机位姿********
                     self.tracking_pc(batch, i)
                 # 使用当前的 rgb 损失,深度损失,sdf 损失来跟踪当前帧的相机位姿
@@ -915,23 +956,19 @@ class CoSLAM:
                     self.global_BA(batch, i)
 
                 # Add keyframe
-                H = self.dataset.H
-                W = self.dataset.W
-                focal_x = self.config["cam"]["fx"]
-                focal_y = self.config["cam"]["fy"]
-                # poses 在原始 self.dataset.poses中被表示为四元数
-                # 但是在这里需要转换为矩阵形式
-                poses = torch.stack(self.dataset.poses)  # 直接在CPU上合并
-                # 然后一次性将合并后的张量移动到目标设备
-                poses = poses.to(self.device)
-                # poses = quad2rotation(poses)
+
                 if self.config["active"]["isActive"]:
+                    H = self.dataset.H
+                    W = self.dataset.W
+                    focal_x = self.config["cam"]["fx"]
+                    focal_y = self.config["cam"]["fy"]
+                    poses = torch.stack(self.dataset.poses).to(self.device)  # 直接在CPU上合并
 
                     if i % self.config["active"]["active_iter"] == 0:
                         # *********添加关键帧***************************
                         print("\nstart evaluation:")
                         print("get rays")
-                        # pose 需后期替换为 
+                        # TODO pose 后期替换为程序获得
                         rays = np.stack(
                             [get_rays_np(H, W, focal_x, focal_y, p) for p in poses.cpu().numpy()[:, :3, :4]],
                             0)  # [N, ro+rd, H, W, 3]
@@ -939,66 +976,55 @@ class CoSLAM:
                         print("done, concats")
 
                         # get all holdout rays (candidate)
-                        rays_rgb_all = torch.cat(
-                            [torch.tensor(rays).to(self.device), images[:, None]], 1
-                        )  # [N, ro+rd+rgb, H, W, 3] 将光线的第一个维度 ro+rd 与输入的图像images[138*800*800*3]拼接，形成rays_rgb_all，
-                        # 表示所有的光线和对应的颜色信息。[138*3*800*800*3]
-                        rays_rgb_all = rays_rgb_all.permute(
-                            0, 2, 3, 1, 4
-                        )  # [N, H, W, ro+rd+rgb, 3] 改变顺序[138*800*800*3*3]
+                        # images 应该是 138*800*800*3
+
+                        rays_rgb_all = torch.cat([torch.tensor(rays).to(self.device), all_images[:, None]],
+                                                 1)  # [N, ro+rd+rgb, H, W, 3]
+                        rays_rgb_all = rays_rgb_all.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
 
                         rays_rgb_holdout = torch.cat(
-                            [
-                                rays_rgb_all[j, :: args.ds_rate, :: args.ds_rate]
-                                for j in i_holdout
-                            ],
-                            # 找第 j 个 hodlout集 的图像,只采样 400*400 (每两个ds_rate=2 像素采样一次)
-                            0,
-                        )  # [80*400, 400, 3, 3]
-                        rays_rgb_holdout = torch.reshape(
-                            rays_rgb_holdout, [-1, 3, 3]
-                        )  # [(N-1)*H*W, ro+rd+rgb, 3] 12800000*3*3
-                        rays_rgb_holdout = torch.transpose(
-                            rays_rgb_holdout, 0, 1
-                        )  # 3*12800000*3 [ ro+rd+rgb,(N-1)*H*W, 3]
-                        batch_rays = rays_rgb_holdout[:2]  # 2*12800000*3
-
-                        print(
-                            "before evaluation:\ni_train",
-                            i_train,
-                            "\ni_holdout",
-                            i_holdout,
-                        )
+                            [rays_rgb_all[j, ::self.downsample_rate, ::self.downsample_rate] for j in i_holdout], 0)
+                        rays_rgb_holdout = torch.reshape(rays_rgb_holdout, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
+                        rays_rgb_holdout = torch.transpose(rays_rgb_holdout, 0, 1)
+                        batch_rays = rays_rgb_holdout[:2]
+                        print('before evaluation:', i_train, i_holdout)
                         # capture new rays
-                        hold_out_index = choose_new_k(
-                            H // args.ds_rate,
-                            W // args.ds_rate,
-                            focal,
-                            batch_rays,
-                            args.choose_k,
-                            **render_kwargs_test,
+                        self.model.eval()
+                        indice = self.select_samples(
+                            # 图像 H*W 368*496, samples=2048
+                            # indice就是从 0 到 182528 之间随机选取 2048 个数作为 index
+                            self.dataset.H, self.dataset.W,
+                            self.config["mapping"]["sample"],  # 2048
                         )
+                        # 每个像素在图像上的位置索引
+                        # ******************************
+                        indice_h, indice_w = indice % (self.dataset.H), indice // (self.dataset.H)
+                        rays_d_cam = (
+                            batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device)
+                        )
+                        target_s = batch["rgb"].squeeze(0)[indice_h, indice_w, :].to(self.device)
+                        target_d = (
+                            batch["depth"].squeeze(0)[indice_h, indice_w]
+                            .to(self.device).unsqueeze(-1)
+                        )
+                        c2w = batch["c2w"][0].to(self.device)
+
+                        rays_o = c2w[None, :3, -1].repeat(self.config["mapping"]["sample"], 1)
+                        rays_d = torch.sum(rays_d_cam[..., None, :] * c2w[:3, :3], -1)
+
+                        self.model.forward(rays_o, rays_d, target_rgb, target_d)
+                        # ******************************
+                        hold_out_index = choose_new_k(H // self.downsample_rate, W // self.downsample_rate, focal_x,
+                                                      focal_y, batch_rays, self.config["active"]["choose_k"])
                         i_train = np.append(i_train, i_holdout[hold_out_index])
                         i_holdout = np.delete(i_holdout, hold_out_index)
-
-                        print(
-                            "after evaluation:\ni_train",
-                            i_train,
-                            "\ni_holdout",
-                            i_holdout,
-                            "\ni_holdout_index",
-                            hold_out_index,
-                        )
+                        print('after evaluation:', i_train, i_holdout, hold_out_index)
 
                         # update training rays
-                        rays_rgb_train = torch.stack(
-                            [rays_rgb_all[i] for i in i_train], 0
-                        )  # train images only
-                        rays_rgb_train = torch.reshape(
-                            rays_rgb_train, [-1, 3, 3]
-                        )  # [(N-1)*H*W, ro+rd+rgb, 3]
+                        rays_rgb_train = torch.stack([rays_rgb_all[i] for i in i_train], 0)  # train images only
+                        rays_rgb_train = torch.reshape(rays_rgb_train, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
 
-                        print("shuffle rays")
+                        print('shuffle rays')
                         np.random.shuffle(rays_rgb_train)
 
                         # **************************
@@ -1006,11 +1032,11 @@ class CoSLAM:
                             batch, filter_depth=self.config["mapping"]["filter_depth"]
                         )
                         print("add keyframe:", i)
-                # if (i % self.config["mapping"]["keyframe_every"] == 0):  # keyframe_every=5
-                #     self.keyframeDatabase.add_keyframe(
-                #         batch, filter_depth=self.config["mapping"]["filter_depth"]  # False
-                #     )
-                #     print("add keyframe:", i)
+                    # if (i % self.config["mapping"]["keyframe_every"] == 0):  # keyframe_every=5
+                    #     self.keyframeDatabase.add_keyframe(
+                    #         batch, filter_depth=self.config["mapping"]["filter_depth"]  # False
+                    #     )
+                    #     print("add keyframe:", i)
 
                 if i % self.config["mesh"]["vis"] == 0:
                     self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
@@ -1119,6 +1145,7 @@ if __name__ == "__main__":
 
     with open(os.path.join(save_path, "config.json"), "w", encoding="utf-8") as f:
         f.write(json.dumps(cfg, indent=4))
+    start_time = time.time()  # 开始时间
 
     slam = CoSLAM(cfg)
 
