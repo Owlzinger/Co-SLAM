@@ -13,11 +13,22 @@ class JointEncoding(nn.Module):
         super(JointEncoding, self).__init__()
         self.config = config
         self.bounding_box = bound_box
-        self.get_resolution()
-        # 联合编码方案:
-        # 1. parametric encoding用HashGrid
-        # 2. coordinate encoding用OneBlob
+        self.get_resolution()  # 从config中获得每一个体素的深度和颜色分辨率
+
+        # ********************* 1.1 编码 *********************
+        """
+        首先,从config中获得的联合编码方案: 1. parametric encoding用HashGrid 2. coordinate encoding用OneBlob
+        然后,通过tiny-cuda-nn实现任意方案的编码网络. 参考https://github.com/NVlabs/tiny-cuda-nn/blob/master/src/encoding.cu
+        """
         self.get_encoding(config)
+
+        # ********************* 1.2 解码 *********************
+        """
+        首先,从config中获得解码网络的各个参数
+        然后,为颜色color和深度sdf各创建一个2层的MLP网络,激活函数都是ReLU
+        color: 最后输出维度为3, 即预测的RGB值
+        sdf:   最后输出维度为16, 即预测的SDF值(1维) + 特征向量h值(15维)
+        """
         self.get_decoder(config)
         self.w = self.config["active"]["w"]
         self.img2mse_uncert_alpha = (
@@ -113,16 +124,14 @@ class JointEncoding(nn.Module):
             -sdf / args["training"]["trunc"]
         )
 
-        signs = sdf[:, 1:] * sdf[:, :-1]
-        mask = torch.where(signs < 0.0, torch.ones_like(signs), torch.zeros_like(signs))
-        inds = torch.argmax(mask, axis=1)
-        inds = inds[..., None]
-        z_min = torch.gather(z_vals, 1, inds)  # The first surface
-        mask = torch.where(
-            z_vals < z_min + args["data"]["sc_factor"] * args["training"]["trunc"],
-            torch.ones_like(z_vals),
-            torch.zeros_like(z_vals),
-        )
+        signs = sdf[:, 1:] * sdf[:, :-1]  # [2048,84] 相邻2个SDF之间是否发生符号变化
+        mask = torch.where(signs < 0.0, torch.ones_like(signs),
+                           torch.zeros_like(signs))  # 找到SDF符号发生变化的部分。mask设为1，否则设为0  [2048,84]
+        inds = torch.argmax(mask, axis=1)  # 在每一行查找最大值的索引  [2048]
+        inds = inds[..., None]  # [2048,1]
+        z_min = torch.gather(z_vals, 1, inds)  # The first surface [2048,1] 获取第一个表面的z值
+        mask = torch.where(z_vals < z_min + args['data']['sc_factor'] * args['training']['trunc'],
+                           torch.ones_like(z_vals), torch.zeros_like(z_vals))
 
         weights = weights * mask
         return weights / (torch.sum(weights, axis=-1, keepdims=True) + 1e-8)
@@ -142,13 +151,14 @@ class JointEncoding(nn.Module):
             uncert_map: [N_rays,N_samples]
         """
         rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 5]
+        # raw光线的前三列是rgb值[N_rays, N_samples, 3][2048, 85, 3]
         uncert = torch.nn.functional.softplus(raw[..., -1])
         # raw的最后一列是不确定度, unsqueeze(-1)是为了和rgb的维度对齐,softplus是为了保证不确定度是正数
-        weights = self.sdf2weights(raw[..., 3], z_vals, args=self.config)
-        rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
+        weights = self.sdf2weights(raw[..., 3], z_vals, args=self.config)  # 通过raw的第四列深度值sdf,得到论文公式5的权重  [2048,85]
+        rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3] 论文4式，计算rgb图 [N_rays, 3] [2048,3]
         uncert_map = torch.sum(weights * weights * uncert, -1)
 
-        depth_map = torch.sum(weights * z_vals, -1)
+        depth_map = torch.sum(weights * z_vals, -1)  # 论文4式，计算深度图    [2048]
         depth_var = torch.sum(
             weights * torch.square(z_vals - depth_map.unsqueeze(-1)), dim=-1
         )
@@ -269,18 +279,20 @@ class JointEncoding(nn.Module):
         Returns:
             outputs: [N_rays, N_samples, 4]
         """
-        inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
+        inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])  # [174080,3] <=== [2048,85,3]
 
-        # Normalize the input to [0, 1] (TCNN convention)
+        # Normalize the input to [0, 1] (TCNN convention)归一化处理 2048根射线,每根射线85个采样点到[0,1]
         if self.config["grid"]["tcnn_encoding"]:
             inputs_flat = (inputs_flat - self.bounding_box[:, 0]) / (
                     self.bounding_box[:, 1] - self.bounding_box[:, 0]
             )
 
-        outputs_flat = batchify(self.query_color_sdf_beta, None)(inputs_flat)
+        # 将inputs_flat分成较小的批次，然后对每个批次使用query_color_sdf函数(也就是encoder+decoder网络)
+        # 得到每个点的深度和颜色信息
+        outputs_flat = batchify(self.query_color_sdf_beta, None)(inputs_flat)  # [174080,4] 4:深度1维,颜色3维
         outputs = torch.reshape(
             outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]]
-        )
+        )  # [2048, 85, 4]
 
         return outputs  # 2048*85*5
 
@@ -317,9 +329,10 @@ class JointEncoding(nn.Module):
 
         """
         # ----------------- 光线采样 -----------------
-        n_rays = rays_o.shape[0]
-        #
-        # Sample depth
+        n_rays = rays_o.shape[0]  # 光线的个数2048
+
+        # ! -------------------- 2.1 Ray samping -------------------- 
+        # ********************* 在光线上(深度)取样，确保取样点深度都是正的 *********************
         if target_d is not None:
             # 如果有目标深度,则在目标深度[-range_d, range_d]范围内均匀/等间隔采样21个点
             # range_d: 0.25
@@ -329,13 +342,17 @@ class JointEncoding(nn.Module):
                 self.config["training"]["range_d"],
                 steps=self.config["training"]["n_range_d"],
             ).to(target_d)
+            # z_samples:Tensor: [21]
+            # z_samples[None, :] Tensor: [1, 21]
+            # .repeat(n_rays, 1) Tensor: [N_rays=2048, 21]
+            # repeat()函数是为了将z_samples扩展维度, 原来只有一行,现在有n_rays行,每行都是相同的
+            # + target_d 为了在目标深度附近采样
             z_samples = z_samples[None, :].repeat(n_rays, 1) + target_d
-            # squeeze()函数是为了去除张量中维度为1的维度
-            # 对于目标深度为负值的点：
-            # 在深度near到far的范围内生成n_range_d个等间隔的张量。
+
+            ##将目标深度为负的那些取样点改为在深度near=0到far=5的范围内生成n_range_d==21个等间隔张量
             # 深度值被赋给z_samples中相应位置，覆盖原先的目标深度为负值的部分。
-            # 使用前的张量是：
-            # tensor([[1], [2], [3]])
+            # 使用squeeze前的张量是：
+            # tensor([[1], [2], [3]]) 0*1*3
             # 使用squeeze()后得到的张量是：
             # tensor([1, 2, 3])
             z_samples[target_d.squeeze() <= 0] = torch.linspace(
@@ -345,15 +362,11 @@ class JointEncoding(nn.Module):
             ).to(target_d)
 
             if self.config["training"]["n_samples_d"] > 0:
-                z_vals = (
-                    torch.linspace(
-                        self.config["cam"]["near"],
-                        self.config["cam"]["far"],
-                        self.config["training"]["n_samples_d"],
-                    )[None, :]
-                    .repeat(n_rays, 1)
-                    .to(rays_o)
-                )
+                # 如果配置中定义了额外的采样点n_samples_d，则在已有采样点的基础上添加这些额外的采样点，并重新排序。
+                z_vals = (torch.linspace(self.config["cam"]["near"],
+                                         self.config["cam"]["far"],
+                                         self.config["training"]["n_samples_d"], )[None, :].repeat(n_rays, 1).to(rays_o)
+                          )
                 z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
             else:
                 z_vals = z_samples
@@ -365,7 +378,7 @@ class JointEncoding(nn.Module):
             ).to(rays_o)
             z_vals = z_vals[None, :].repeat(n_rays, 1)  # [n_rays, n_samples]
 
-        # Perturb sampling depths 给深度加入噪音
+        # ********************* 给取样点的深度添加扰动 *********************
         if self.config["training"]["perturb"] > 0.0:
             mids = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
             upper = torch.cat([mids, z_vals[..., -1:]], -1)
@@ -385,13 +398,8 @@ class JointEncoding(nn.Module):
         # 默认不执行
         if self.config["training"]["n_importance"] > 0:
             rgb_map_0, disp_map_0, acc_map_0, depth_map_0, depth_var_0, uncert_map0 = (
-                rgb_map,
-                disp_map,
-                acc_map,
-                depth_map,
-                depth_var,
-                uncert_map,
-            )
+                rgb_map, disp_map, acc_map, depth_map,
+                depth_var, uncert_map,)
 
             z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
             z_samples = sample_pdf(
@@ -443,7 +451,8 @@ class JointEncoding(nn.Module):
             rays_d: ray directions (Bs, 3)
             frame_ids: use for pose correction (Bs, 1)
             target_rgb: rgb value (Bs, 3)
-            target_d: depth value (Bs, 1)
+            target_d: depth value (Bs, 1) 可选,选了就在目标深度附近采样
+            不选就在near到far之间采样
             c2w_array: poses (N, 4, 4)
              r r r tx
              r r r ty
