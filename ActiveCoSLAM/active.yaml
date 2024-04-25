@@ -120,7 +120,7 @@ active:
   init_image: 10
   choose_k: 4
   w: 0.01
-  ds_rate: 2
+  downsample_rate: 2
   beta_min: 0.01
 
 
