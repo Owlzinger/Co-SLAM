@@ -14,7 +14,6 @@ import json
 import cv2
 
 from torch.utils.data import DataLoader
-# from tqdm import tqdm
 from tqdm import tqdm
 from tqdm.rich import trange
 
@@ -22,7 +21,6 @@ from tqdm.rich import trange
 import config
 
 from ActiveCoSLAM.ac_scene_rep import JointEncoding
-from ActiveCoSLAM.information_gain import choose_new_k, get_rays_np
 from ActiveCoSLAM.ac_dataset import get_dataset
 
 # from model.scene_rep import JointEncoding
@@ -35,6 +33,8 @@ from optimization.utils import (
     matrix_to_axis_angle,
     matrix_to_quaternion,
 )
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
 
 class CoSLAM:
@@ -106,13 +106,7 @@ class CoSLAM:
         # num_rays_to_save= total pixel *  5% (下采样)
         print("#Pixels to save: ", self.dataset.num_rays_to_save)
         return KeyFrameDatabase(
-            config,
-            self.dataset.H,
-            self.dataset.W,
-            num_kf,
-            self.dataset.num_rays_to_save,
-            self.device,
-        )
+            config, self.dataset.H, self.dataset.W, num_kf, self.dataset.num_rays_to_save, self.device, )
 
     def load_gt_pose(self):
         """
@@ -303,12 +297,7 @@ class CoSLAM:
                 batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device)
             )
             target_s = batch["rgb"].squeeze(0)[indice_h, indice_w, :].to(self.device)
-            target_d = (
-                batch["depth"]
-                .squeeze(0)[indice_h, indice_w]
-                .to(self.device)
-                .unsqueeze(-1)
-            )
+            target_d = (batch["depth"].squeeze(0)[indice_h, indice_w].to(self.device).unsqueeze(-1))
 
             rays_o = c2w[None, :3, -1].repeat(self.config["mapping"]["sample"], 1)
             rays_d = torch.sum(rays_d_cam[..., None, :] * c2w[:3, :3], -1)
@@ -890,24 +879,17 @@ class CoSLAM:
         # 我想将 self.dataset 中的数据的前百分之 25的图片保存为训练集
         # 后百分之 75的图片保存为验证集
 
-        train_size = int(0.3 * dataset_size)  # 前百分之 30的图片作为训练集
-        holdout_size = dataset_size - train_size  # 后百分之 70的图片作为保留集
+        # train_size = int(0.3 * dataset_size)  # 前百分之 30的图片作为训练集
+        # holdout_size = dataset_size - train_size  # 后百分之 70的图片作为保留集
         # 按顺序划分
-        train_dataset = torch.utils.data.Subset(self.dataset, range(0, train_size))
-        holdout_dataset = torch.utils.data.Subset(self.dataset, range(train_size, dataset_size))
+        train_dataset = torch.utils.data.Subset(self.dataset, range(0, 20))
+        holdout_dataset = torch.utils.data.Subset(self.dataset, range(20, dataset_size))
 
-        all_data_loader = DataLoader(self.dataset, num_workers=self.config["data"]["num_workers"])
         train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
         validation_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
-        i_train = train_dataset.indices
-        i_holdout = holdout_dataset.indices
 
-        all_images = []
-        for batch in all_data_loader:
-            all_images.append(batch['rgb'].detach().cpu().numpy())  # 确保只在CPU上操作，避免GPU溢出
-            # Start Co-SLAM!
-        all_images = np.concatenate(all_images, axis=0)  # 最后再进行一次合并
-        all_images = torch.Tensor(all_images).to(self.device)
+        i_train = np.array(train_dataset.indices)
+        i_holdout = np.array(holdout_dataset.indices)
 
         for i, batch in tqdm(enumerate(train_loader)):
             # batch = {
@@ -957,87 +939,71 @@ class CoSLAM:
 
                 # Add keyframe
 
-                if self.config["active"]["isActive"]:
-                    H = self.dataset.H
-                    W = self.dataset.W
-                    focal_x = self.config["cam"]["fx"]
-                    focal_y = self.config["cam"]["fy"]
-                    poses = torch.stack(self.dataset.poses).to(self.device)  # 直接在CPU上合并
+                if i % self.config["active"]["active_iter"] == 0 and self.config["active"]["isActive"]:
 
-                    if i % self.config["active"]["active_iter"] == 0:
-                        # *********添加关键帧***************************
-                        print("\nstart evaluation:")
-                        print("get rays")
-                        # TODO pose 后期替换为程序获得
-                        rays = np.stack(
-                            [get_rays_np(H, W, focal_x, focal_y, p) for p in poses.cpu().numpy()[:, :3, :4]],
-                            0)  # [N, ro+rd, H, W, 3]
+                    # *********添加关键帧***************************
+                    print('before evaluation:', i_train, i_holdout.min(), i_holdout.max())
+                    # *******************************************
+                    print("\nstart evaluation:")
 
-                        print("done, concats")
+                    downsampled_H, downsampled_W = self.dataset.H // 2, self.dataset.W // 2  # 只取 1/4 的点, 原论文是 1/2的点, 但会出现 OOM
+                    samples_num = downsampled_H * downsampled_W  # 采样点数量
 
-                        # get all holdout rays (candidate)
-                        # images 应该是 138*800*800*3
+                    self.model.eval()
+                    indice = self.select_samples(
+                        # 图像 H*W 368*496, samples=45632
+                        # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
+                        self.dataset.H, self.dataset.W, samples_num)
+                    indice_h, indice_w = indice % self.dataset.H, indice // self.dataset.H
+                    pres = []
+                    posts = []
+                    for i, batch in enumerate(validation_loader):
+                        print("image:", i, "/", len(validation_loader.dataset), "\r", end="")
 
-                        rays_rgb_all = torch.cat([torch.tensor(rays).to(self.device), all_images[:, None]],
-                                                 1)  # [N, ro+rd+rgb, H, W, 3]
-                        rays_rgb_all = rays_rgb_all.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
-
-                        rays_rgb_holdout = torch.cat(
-                            [rays_rgb_all[j, ::self.downsample_rate, ::self.downsample_rate] for j in i_holdout], 0)
-                        rays_rgb_holdout = torch.reshape(rays_rgb_holdout, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
-                        rays_rgb_holdout = torch.transpose(rays_rgb_holdout, 0, 1)
-                        batch_rays = rays_rgb_holdout[:2]
-                        print('before evaluation:', i_train, i_holdout)
-                        # capture new rays
-                        self.model.eval()
-                        indice = self.select_samples(
-                            # 图像 H*W 368*496, samples=2048
-                            # indice就是从 0 到 182528 之间随机选取 2048 个数作为 index
-                            self.dataset.H, self.dataset.W,
-                            self.config["mapping"]["sample"],  # 2048
-                        )
-                        # 每个像素在图像上的位置索引
-                        # ******************************
-                        indice_h, indice_w = indice % (self.dataset.H), indice // (self.dataset.H)
-                        rays_d_cam = (
-                            batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device)
-                        )
+                        rays_d_cam = (batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device))
                         target_s = batch["rgb"].squeeze(0)[indice_h, indice_w, :].to(self.device)
-                        target_d = (
-                            batch["depth"].squeeze(0)[indice_h, indice_w]
-                            .to(self.device).unsqueeze(-1)
-                        )
+                        target_d = (batch["depth"].squeeze(0)[indice_h, indice_w].to(self.device).unsqueeze(-1))
                         c2w = batch["c2w"][0].to(self.device)
 
-                        rays_o = c2w[None, :3, -1].repeat(self.config["mapping"]["sample"], 1)
+                        rays_o = c2w[None, :3, -1].repeat(samples_num, 1)
                         rays_d = torch.sum(rays_d_cam[..., None, :] * c2w[:3, :3], -1)
 
-                        self.model.forward(rays_o, rays_d, target_rgb, target_d)
-                        # ******************************
-                        hold_out_index = choose_new_k(H // self.downsample_rate, W // self.downsample_rate, focal_x,
-                                                      focal_y, batch_rays, self.config["active"]["choose_k"])
-                        i_train = np.append(i_train, i_holdout[hold_out_index])
-                        i_holdout = np.delete(i_holdout, hold_out_index)
-                        print('after evaluation:', i_train, i_holdout, hold_out_index)
+                        with torch.no_grad():
+                            rend_dict = self.model.forward(rays_o, rays_d, target_s, target_d)
 
-                        # update training rays
-                        rays_rgb_train = torch.stack([rays_rgb_all[i] for i in i_train], 0)  # train images only
-                        rays_rgb_train = torch.reshape(rays_rgb_train, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
+                        uncert_render = rend_dict["uncert_map"].reshape(-1, samples_num, 1) + 1e-9
+                        # 1,160000,1 新数据集r2(holdout数据集)的不确定度 beta, \beta^2(r_2)
+                        uncert_pts = rend_dict["raw"][..., -1].reshape(-1, samples_num,
+                                                                       self.config["training"]["n_samples_d"] +
+                                                                       self.config["training"]["n_importance"] +
+                                                                       self.config["training"]["n_range_d"]
+                                                                       ) + 1e-9
+                        weight_pts = rend_dict["weights"].reshape(-1, samples_num,
+                                                                  self.config["training"]["n_samples_d"] +  # 64
+                                                                  self.config["training"]["n_importance"]  # 0
+                                                                  + self.config["training"]["n_range_d"]  # 21
+                                                                  )  # 1,160000,192
 
-                        print('shuffle rays')
-                        np.random.shuffle(rays_rgb_train)
+                        pre = uncert_pts.sum([1, 2])  # 1,160000,192->1
 
-                        # **************************
-                        self.keyframeDatabase.add_keyframe(
-                            batch, filter_depth=self.config["mapping"]["filter_depth"]
-                        )
-                        print("add keyframe:", i)
-                    # if (i % self.config["mapping"]["keyframe_every"] == 0):  # keyframe_every=5
-                    #     self.keyframeDatabase.add_keyframe(
-                    #         batch, filter_depth=self.config["mapping"]["filter_depth"]  # False
-                    #     )
-                    #     print("add keyframe:", i)
+                        post = (1.0 / (1.0 / uncert_pts + weight_pts * weight_pts / uncert_render)).sum([1, 2])
+                        pres.append(pre)
+                        posts.append(post)
 
+                    pres = torch.cat(pres, 0)  # 40,
+                    posts = torch.cat(posts, 0)  # 40
+                    diff = pres - posts
+                    hold_out_index = torch.topk(pres - posts, self.config["active"]["choose_k"])[1].cpu().numpy()
+
+                    i_train = np.append(i_train, i_holdout[hold_out_index])
+                    i_holdout = np.delete(i_holdout, hold_out_index)
+                    print('after evaluation:', i_train, i_holdout, hold_out_index)
+
+                    # **************************
+                    self.keyframeDatabase.add_keyframe(
+                        batch, filter_depth=self.config["mapping"]["filter_depth"]
+                    )
+                    print("add keyframe:", i)
                 if i % self.config["mesh"]["vis"] == 0:
                     self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
                     pose_relative = self.convert_relative_pose()
@@ -1089,26 +1055,11 @@ class CoSLAM:
         self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_final"])
 
         pose_relative = self.convert_relative_pose()
-        pose_evaluation(
-            self.pose_gt,
-            self.est_c2w_data,
-            1,
-            os.path.join(
-                self.config["data"]["output"], self.config["data"]["exp_name"]
-            ),
-            i,
-        )
-        pose_evaluation(
-            self.pose_gt,
-            pose_relative,
-            1,
-            os.path.join(
-                self.config["data"]["output"], self.config["data"]["exp_name"]
-            ),
-            i,
-            img="pose_r",
-            name="output_relative.txt",
-        )
+        pose_evaluation(self.pose_gt, self.est_c2w_data, 1,
+                        os.path.join(self.config["data"]["output"], self.config["data"]["exp_name"]), i)
+        pose_evaluation(self.pose_gt, pose_relative, 1,
+                        os.path.join(self.config["data"]["output"], self.config["data"]["exp_name"]), i, img="pose_r",
+                        name="output_relative.txt")
 
         # TODO: Evaluation of reconstruction
 
@@ -1116,20 +1067,12 @@ class CoSLAM:
 if __name__ == "__main__":
 
     print("Start running...")
-    parser = argparse.ArgumentParser(
-        description="Arguments for running the NICE-SLAM/iMAP*."
-    )
+    parser = argparse.ArgumentParser(description="Arguments for running the NICE-SLAM/iMAP*.")
     parser.add_argument("--config", type=str, help="Path to config file.")
-    parser.add_argument(
-        "--input_folder",
-        type=str,
-        help="input folder, this have higher priority, can overwrite the one in config file",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        help="output folder, this have higher priority, can overwrite the one in config file",
-    )
+    parser.add_argument("--input_folder", type=str,
+                        help="input folder, this have higher priority, can overwrite the one in config file")
+    parser.add_argument("--output", type=str,
+                        help="output folder, this have higher priority, can overwrite the one in config file")
 
     args = parser.parse_args()
 

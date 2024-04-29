@@ -20,7 +20,6 @@ import config
 from model.scene_rep import JointEncoding
 from model.keyframe import KeyFrameDatabase
 from datasets.dataset import get_dataset
-from nerf.active.acrun_nerf import choose_new_k
 from utils import coordinates, extract_mesh, colormap_image
 from tools.eval_ate import pose_evaluation
 from optimization.utils import at_to_transform_matrix, qt_to_transform_matrix, matrix_to_axis_angle, \
@@ -655,8 +654,8 @@ class CoSLAM():
                 depth_colormap[:, mask] = 255.
                 depth_colormap = depth_colormap.permute(1, 2, 0).cpu().numpy()
                 image = np.hstack((rgb, depth_colormap))
-                cv2.namedWindow('RGB-D'.format(i), cv2.WINDOW_AUTOSIZE)
-                cv2.imshow('RGB-D'.format(i), image)
+                cv2.namedWindow('RGB-D'.format(), cv2.WINDOW_AUTOSIZE)
+                cv2.imshow('RGB-D'.format(), image)
                 key = cv2.waitKey(1)
 
             # First frame mapping
@@ -677,17 +676,6 @@ class CoSLAM():
                 if i % self.config['mapping']['keyframe_every'] == 0:
                     self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
                     print('add keyframe:', i)
-                if self.config['active']['isActive']:
-                    if i % self.config['mapping']['keyframe_every'] == 0:
-                        hold_out_index = choose_new_k(
-                            self.H // args.ds_rate,
-                            self.W // args.ds_rate,
-                            focal,
-                            batch_rays,
-                            self.config['active']['choose_k'],
-                        )
-                        self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
-                        print('add keyframe:', i)
 
                 if i % self.config['mesh']['vis'] == 0:
                     self.save_mesh(i, voxel_size=self.config['mesh']['voxel_eval'])
@@ -699,14 +687,14 @@ class CoSLAM():
                                     img='pose_r', name='output_relative.txt')
 
                     if cfg['mesh']['visualisation']:
-                        cv2.namedWindow('Traj:'.format(i), cv2.WINDOW_AUTOSIZE)
+                        cv2.namedWindow('Traj:'.format(), cv2.WINDOW_AUTOSIZE)
                         traj_image = cv2.imread(
                             os.path.join(self.config['data']['output'], self.config['data']['exp_name'],
                                          "pose_r_{}.png".format(i)))
                         # best_traj_image = cv2.imread(os.path.join(best_logdir_scene, "pose_r_{}.png".format(i)))
                         # image_show = np.hstack((traj_image, best_traj_image))
                         image_show = traj_image
-                        cv2.imshow('Traj:'.format(i), image_show)
+                        cv2.imshow('Traj:'.format(), image_show)
                         key = cv2.waitKey(1)
 
         model_savepath = os.path.join(self.config['data']['output'], self.config['data']['exp_name'],

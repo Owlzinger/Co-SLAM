@@ -33,12 +33,8 @@ class JointEncoding(nn.Module):
         self.w = self.config["active"]["w"]
         self.img2mse_uncert_alpha = (
             lambda x, y, uncert, alpha, w: torch.mean(
-                (1 / (2 * (uncert + 1e-9).unsqueeze(-1))) * ((x - y) ** 2)
-            )
-                                           + 0.5 * torch.mean(torch.log(uncert + 1e-9))
-                                           + w * alpha.mean()
-                                           + 4.0
-        )
+                (1 / (2 * (uncert + 1e-9).unsqueeze(-1))) * ((x - y) ** 2))
+                                           + 0.5 * torch.mean(torch.log(uncert + 1e-9)) + w * alpha.mean() + 4.0)
 
     def get_resolution(self):
         """
@@ -289,7 +285,7 @@ class JointEncoding(nn.Module):
 
         # 将inputs_flat分成较小的批次，然后对每个批次使用query_color_sdf函数(也就是encoder+decoder网络)
         # 得到每个点的深度和颜色信息
-        outputs_flat = batchify(self.query_color_sdf_beta, None)(inputs_flat)  # [174080,4] 4:深度1维,颜色3维
+        outputs_flat = batchify(self.query_color_sdf_beta, None)(inputs_flat)  # [174080,4] rgb,sdf,beta
         outputs = torch.reshape(
             outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]]
         )  # [2048, 85, 4]
@@ -347,9 +343,9 @@ class JointEncoding(nn.Module):
             # .repeat(n_rays, 1) Tensor: [N_rays=2048, 21]
             # repeat()函数是为了将z_samples扩展维度, 原来只有一行,现在有n_rays行,每行都是相同的
             # + target_d 为了在目标深度附近采样
-            z_samples = z_samples[None, :].repeat(n_rays, 1) + target_d
+            z_samples = z_samples[None, :].repeat(n_rays, 1) + target_d  # 2048*21
 
-            ##将目标深度为负的那些取样点改为在深度near=0到far=5的范围内生成n_range_d==21个等间隔张量
+            # 将目标深度为负的那些取样点改为在深度near=0 到 far=5 的范围内生成n_range_d==21个等间隔张量
             # 深度值被赋给z_samples中相应位置，覆盖原先的目标深度为负值的部分。
             # 使用squeeze前的张量是：
             # tensor([[1], [2], [3]]) 0*1*3
@@ -366,8 +362,9 @@ class JointEncoding(nn.Module):
                 z_vals = (torch.linspace(self.config["cam"]["near"],
                                          self.config["cam"]["far"],
                                          self.config["training"]["n_samples_d"], )[None, :].repeat(n_rays, 1).to(rays_o)
-                          )
+                          )  # 64
                 z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+                # z_vals : [2048, 85]一条光线上一共采样85个点
             else:
                 z_vals = z_samples
         else:  # 没有  target_d
@@ -428,6 +425,7 @@ class JointEncoding(nn.Module):
             "acc_map": acc_map,
             "depth_var": depth_var,
             "uncert_map": uncert_map,
+            "weights": weights
         }
         ret = {**ret, "z_vals": z_vals}
 
@@ -441,6 +439,7 @@ class JointEncoding(nn.Module):
             ret["depth_var0"] = depth_var_0
             ret["z_std"] = torch.std(z_samples, dim=-1, unbiased=False)
             ret["uncert_map0"] = uncert_map0
+            ret["weights0"] = weights
 
         return ret
 
