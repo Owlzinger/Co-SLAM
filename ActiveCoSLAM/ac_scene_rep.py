@@ -35,6 +35,7 @@ class JointEncoding(nn.Module):
             lambda x, y, uncert, alpha, w: torch.mean(
                 (1 / (2 * (uncert + 1e-9).unsqueeze(-1))) * ((x - y) ** 2))
                                            + 0.5 * torch.mean(torch.log(uncert + 1e-9)) + w * alpha.mean() + 4.0)
+        self.beta_min = self.config['active']['beta_min']
 
     def get_resolution(self):
         """
@@ -148,19 +149,15 @@ class JointEncoding(nn.Module):
         """
         rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 5]
         # raw光线的前三列是rgb值[N_rays, N_samples, 3][2048, 85, 3]
-        uncert = torch.nn.functional.softplus(raw[..., -1])
+        uncert = torch.nn.functional.softplus(raw[..., -1]) + self.beta_min
         # raw的最后一列是不确定度, unsqueeze(-1)是为了和rgb的维度对齐,softplus是为了保证不确定度是正数
         weights = self.sdf2weights(raw[..., 3], z_vals, args=self.config)  # 通过raw的第四列深度值sdf,得到论文公式5的权重  [2048,85]
         rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3] 论文4式，计算rgb图 [N_rays, 3] [2048,3]
         uncert_map = torch.sum(weights * weights * uncert, -1)
 
         depth_map = torch.sum(weights * z_vals, -1)  # 论文4式，计算深度图    [2048]
-        depth_var = torch.sum(
-            weights * torch.square(z_vals - depth_map.unsqueeze(-1)), dim=-1
-        )
-        disp_map = 1.0 / torch.max(
-            1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1)
-        )
+        depth_var = torch.sum(weights * torch.square(z_vals - depth_map.unsqueeze(-1)), dim=-1)
+        disp_map = 1.0 / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
         acc_map = torch.sum(weights, -1)
 
         if white_bkgd:
@@ -227,6 +224,7 @@ class JointEncoding(nn.Module):
 
     def query_beta(self, query_points, embed=False):
         """
+        没用到这个函数
         Get the beta / variance value of the query points
         Params:
             query_points: [N_rays, N_samples, 3]
@@ -240,7 +238,7 @@ class JointEncoding(nn.Module):
         embedded = self.embed_fn(inputs_flat)  # 65536,32
         embedded_pos = self.embedpos_fn(inputs_flat)  # 65536,48
         out = self.sdf_net(torch.cat([embedded, embedded_pos], dim=-1))  # 65536,17
-        _, _, beta = out[..., :1], out[..., 1:-1], out[..., -1]  # 1,15,1
+        beta = out[..., -1]  # 1,15,1
         beta = torch.reshape(beta, list(query_points.shape[:-1]))
 
         return beta
@@ -392,7 +390,7 @@ class JointEncoding(nn.Module):
         )
 
         # Importance sampling
-        # 默认不执行
+        # 默认不执行,作者认为这部分对重建质量提升不大,还会增加计算量
         if self.config["training"]["n_importance"] > 0:
             rgb_map_0, disp_map_0, acc_map_0, depth_map_0, depth_var_0, uncert_map0 = (
                 rgb_map, disp_map, acc_map, depth_map,
@@ -479,13 +477,10 @@ class JointEncoding(nn.Module):
         alpha = torch.zeros_like(uncert.unsqueeze(-1))
         if uncert.min() > 0:
             # leave alpha as 0
+            # self.w是控制正则化项的权重
             rgb_loss = self.img2mse_uncert_alpha(
-                rend_dict["rgb"] * rgb_weight,
-                target_rgb * rgb_weight,
-                uncert,
-                alpha,
-                self.w,
-            )
+                rend_dict["rgb"] * rgb_weight, target_rgb * rgb_weight,
+                uncert, alpha, self.w)
         else:
             rgb_loss = compute_loss(
                 rend_dict["rgb"] * rgb_weight, target_rgb * rgb_weight
