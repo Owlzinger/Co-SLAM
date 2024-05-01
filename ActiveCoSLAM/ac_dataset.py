@@ -1,3 +1,4 @@
+import copy
 import glob
 import os
 import cv2
@@ -198,49 +199,6 @@ class TUMDataset(BaseDataset):
     def __len__(self):
         return self.num_frames
 
-    def load_color(self):
-        def __getitem__(self, index):
-            color_path = self.color_paths[index]
-            color_data = cv2.imread(color_path)
-            if self.distortion is not None:
-                K = as_intrinsics_matrix([self.config['cam']['fx'],
-                                          self.config['cam']['fy'],
-                                          self.config['cam']['cx'],
-                                          self.config['cam']['cy']])
-                color_data = cv2.undistort(color_data, K, self.distortion)
-
-            color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
-            color_data = color_data / 255.
-
-            H, W = color_data.shape
-            color_data = cv2.resize(color_data, (W, H))
-
-            if self.downsample_factor > 1:
-                H = H // self.downsample_factor
-                W = W // self.downsample_factor
-                self.fx = self.fx // self.downsample_factor
-                self.fy = self.fy // self.downsample_factor
-                color_data = cv2.resize(color_data, (W, H), interpolation=cv2.INTER_AREA)
-
-            if self.rays_d is None:
-                self.rays_d = get_camera_rays(self.H, self.W, self.fx, self.fy, self.cx, self.cy)
-
-            color_data = torch.from_numpy(color_data.astype(np.float32))
-
-            if self.crop_size is not None:
-                # follow the pre-processing step in lietorch, actually is resize
-                color_data = color_data.permute(2, 0, 1)
-                color_data = F.interpolate(
-                    color_data[None], self.crop_size, mode='bilinear', align_corners=True)[0]
-                color_data = color_data.permute(1, 2, 0).contiguous()
-
-            edge = self.config['cam']['crop_edge']
-            if edge > 0:
-                # crop image edge, there are invalid value on the edge of the color image
-                color_data = color_data[edge:-edge, edge:-edge]
-
-            return color_data
-
     def delete(self, indices):
         """Modify the dataset by selecting a subset of indices.
         Args:
@@ -275,6 +233,7 @@ class TUMDataset(BaseDataset):
         return self
 
     def __getitem__(self, index):
+
         color_path = self.color_paths[index]
         depth_path = self.depth_paths[index]
 
@@ -334,6 +293,9 @@ class TUMDataset(BaseDataset):
             "direction": self.rays_d
         }
         return ret
+
+    def remove(self, index):
+        pass
 
 
 class iPhoneDataset(BaseDataset):
@@ -976,3 +938,14 @@ class RealsenseDataset(BaseDataset):
                 c2w = self.align_mat
                 c2w = torch.from_numpy(c2w).float()
                 self.poses.append(c2w)
+
+
+def slice_dataset(dataset, index):
+    subset = copy.copy(dataset)
+    # Manually assign selected data to the new dataset object
+    subset.color_paths = [dataset.color_paths[i] for i in index]
+    subset.depth_paths = [dataset.depth_paths[i] for i in index]
+    subset.poses = [dataset.poses[i] for i in index]
+    subset.frame_ids = [dataset.frame_ids[i] for i in index]
+    subset.num_frames = len(subset.frame_ids)
+    return subset

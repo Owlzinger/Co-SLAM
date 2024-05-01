@@ -118,7 +118,7 @@ active:
   isActive: True
   active_iter: 10
   init_image: 10
-  choose_k: 4
+  choose_k: 10
   w: 0.01
   downsample_rate: 2
   beta_min: 0.01
