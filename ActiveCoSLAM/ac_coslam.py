@@ -881,15 +881,12 @@ class CoSLAM:
 
         # train_size = int(0.3 * dataset_size)  # 前百分之 30的图片作为训练集
         # holdout_size = dataset_size - train_size  # 后百分之 70的图片作为保留集
-        # 按顺序划分
+        # 前 20个图像作为训练集
         train_dataset = torch.utils.data.Subset(self.dataset, range(0, 20))
-        holdout_dataset = torch.utils.data.Subset(self.dataset, range(20, dataset_size))
 
         train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
-        validation_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
 
         i_train = np.array(train_dataset.indices)
-        i_holdout = np.array(holdout_dataset.indices)
 
         for i, batch in tqdm(enumerate(train_loader)):
             # batch = {
@@ -918,9 +915,7 @@ class CoSLAM:
             # First frame mapping
             # *******建立初始的地图和位姿估计********
             if i == 0:
-                self.first_frame_mapping(
-                    batch, self.config["mapping"]["first_iters"]
-                )  # first_iters=1000
+                self.first_frame_mapping(batch, self.config["mapping"]["first_iters"])  # first_iters=1000
 
             # 建立每一帧的地图和位姿估计
             # Tracking + Mapping
@@ -941,15 +936,16 @@ class CoSLAM:
 
                 if i % self.config["active"]["active_iter"] == 0 and self.config["active"]["isActive"]:
 
+                    downsampled_H, downsampled_W = self.dataset.H // 2, self.dataset.W // 2  # 只取 1/4 的点, 
+                    # 原论文是 1/2的点, 但会出现 OOM
+                    samples_num = downsampled_H * downsampled_W  # 采样点数量
+                    holdout_dataset = torch.utils.data.Subset(self.dataset, range(20, dataset_size))
+                    holdout_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
+                    # i_holdout = np.array(holdout_dataset.indices)
                     # *********添加关键帧***************************
-                    print('before evaluation:', i_train, i_holdout.min(), i_holdout.max())
+                    # print('before evaluation:', i_train, i_holdout.min(), i_holdout.max())
                     # *******************************************
                     print("\nstart evaluation:")
-
-                    downsampled_H, downsampled_W = self.dataset.H // 2, self.dataset.W // 2  # 只取 1/4 的点, 原论文是 1/2的点, 但会出现 OOM
-                    samples_num = downsampled_H * downsampled_W  # 采样点数量
-
-                    self.model.eval()
                     indice = self.select_samples(
                         # 图像 H*W 368*496, samples=45632
                         # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
@@ -957,8 +953,10 @@ class CoSLAM:
                     indice_h, indice_w = indice % self.dataset.H, indice // self.dataset.H
                     pres = []
                     posts = []
-                    for i, batch in enumerate(validation_loader):
-                        print("image:", i, "/", len(validation_loader.dataset), "\r", end="")
+                    self.model.eval()
+
+                    for i, batch in enumerate(holdout_loader):
+                        print("image:", i, "/", len(holdout_loader.dataset), "\r", end="")
 
                         rays_d_cam = (batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device))
                         target_s = batch["rgb"].squeeze(0)[indice_h, indice_w, :].to(self.device)
@@ -994,41 +992,31 @@ class CoSLAM:
                     posts = torch.cat(posts, 0)  # 40
                     diff = pres - posts
                     hold_out_index = torch.topk(pres - posts, self.config["active"]["choose_k"])[1].cpu().numpy()
-
-                    i_train = np.append(i_train, i_holdout[hold_out_index])
-                    i_holdout = np.delete(i_holdout, hold_out_index)
-                    print('after evaluation:', i_train, i_holdout, hold_out_index)
-
+                    # 将 hold_out_index 对应的图片从 holdout_datset 中删除,并加入到 train_dataset 中
+                    holdout_dataset = [
+                        holdout_dataset[i]
+                        for i in range(len(holdout_dataset))
+                        if i not in hold_out_index
+                    ]
+                    holdout_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
+                    # print('after evaluation:', i_train, i_holdout, hold_out_index)
+                    self.model.train()
                     # **************************
-                    self.keyframeDatabase.add_keyframe(
-                        batch, filter_depth=self.config["mapping"]["filter_depth"]
-                    )
+                    self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config["mapping"]["filter_depth"])
                     print("add keyframe:", i)
+
                 if i % self.config["mesh"]["vis"] == 0:
                     self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
                     pose_relative = self.convert_relative_pose()
+                    pose_evaluation(self.pose_gt, self.est_c2w_data, 1, os.path.join(
+                        self.config["data"]["output"],
+                        self.config["data"]["exp_name"],
+                    ), i, )
                     pose_evaluation(
-                        self.pose_gt,
-                        self.est_c2w_data,
-                        1,
-                        os.path.join(
+                        self.pose_gt, pose_relative, 1, os.path.join(
                             self.config["data"]["output"],
                             self.config["data"]["exp_name"],
-                        ),
-                        i,
-                    )
-                    pose_evaluation(
-                        self.pose_gt,
-                        pose_relative,
-                        1,
-                        os.path.join(
-                            self.config["data"]["output"],
-                            self.config["data"]["exp_name"],
-                        ),
-                        i,
-                        img="pose_r",
-                        name="output_relative.txt",
-                    )
+                        ), i, img="pose_r", name="output_relative.txt")
 
                     if cfg["mesh"]["visualisation"]:
                         cv2.namedWindow("Traj:".format(), cv2.WINDOW_AUTOSIZE)
