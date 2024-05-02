@@ -199,38 +199,38 @@ class TUMDataset(BaseDataset):
     def __len__(self):
         return self.num_frames
 
-    def delete(self, indices):
-        """Modify the dataset by selecting a subset of indices.
-        Args:
-            dataset (Dataset): The dataset to be modified.
-            indices (list): The indices of the dataset to be selected.
-        Returns:
-            Dataset: The modified dataset.
-        """
-        self.indices = [int(i) for i in indices]
-        self.poses = [self.poses[i] for i in indices]  # 保留classes属性
-        self.color_paths = [self.color_paths[i] for i in indices]
-        self.depth_paths = [self.depth_paths[i] for i in indices]
-        self.frame_ids = [self.frame_ids[i] for i in indices]
-        self.num_frames = len(self.frame_ids)
-
-    # 请实现函数__add__ 使得两个数据集可以相加
-    def __add__(self, other):
-        """Add two datasets together.
-        Args:
-            other (Dataset): The dataset to be added.
-        Returns:
-            Dataset: The combined dataset.
-        """
-        # 请检查两个数据集是否是相同的类
-        if not isinstance(other, self.__class__):
-            raise ValueError("Only datasets of the same class can be added together.")
-        self.poses += other.poses
-        self.color_paths += other.color_paths
-        self.depth_paths += other.depth_paths
-        self.frame_ids += other.frame_ids
-        self.num_frames = len(self.frame_ids)
-        return self
+    # def delete(self, indices):
+    #     """Modify the dataset by selecting a subset of indices.
+    #     Args:
+    #         dataset (Dataset): The dataset to be modified.
+    #         indices (list): The indices of the dataset to be selected.
+    #     Returns:
+    #         Dataset: The modified dataset.
+    #     """
+    #     self.indices = [int(i) for i in indices]
+    #     self.poses = [self.poses[i] for i in indices]  # 保留classes属性
+    #     self.color_paths = [self.color_paths[i] for i in indices]
+    #     self.depth_paths = [self.depth_paths[i] for i in indices]
+    #     self.frame_ids = [self.frame_ids[i] for i in indices]
+    #     self.num_frames = len(self.frame_ids)
+    # 
+    # # 请实现函数__add__ 使得两个数据集可以相加
+    # def __add__(self, other):
+    #     """Add two datasets together.
+    #     Args:
+    #         other (Dataset): The dataset to be added.
+    #     Returns:
+    #         Dataset: The combined dataset.
+    #     """
+    #     # 请检查两个数据集是否是相同的类
+    #     if not isinstance(other, self.__class__):
+    #         raise ValueError("Only datasets of the same class can be added together.")
+    #     self.poses += other.poses
+    #     self.color_paths += other.color_paths
+    #     self.depth_paths += other.depth_paths
+    #     self.frame_ids += other.frame_ids
+    #     self.num_frames = len(self.frame_ids)
+    #     return self
 
     def __getitem__(self, index):
 
