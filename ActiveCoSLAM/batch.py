@@ -907,6 +907,9 @@ class CoSLAM:
             train_dataset, num_workers=self.config["data"]["num_workers"]
         )
         holdout_dataset = self.dataset.slice(range(init_image, dataset_size))
+        holdout_loader = DataLoader(
+            holdout_dataset, num_workers=self.config["data"]["num_workers"]
+        )
 
         for i, batch in tqdm(enumerate(train_loader)):
             # batch = {
@@ -944,24 +947,23 @@ class CoSLAM:
             else:
                 # ***************** Tracking*****************
                 if self.config["tracking"]["iter_point"] > 0:  # 代码中是 False
-                    # 通过点云来跟踪当前帧的相机位姿
+                    # *****通过点云来跟踪当前帧的相机位姿********
                     self.tracking_pc(batch, i)
                 # 使用当前的 rgb 损失,深度损失,sdf 损失来跟踪当前帧的相机位姿
                 self.tracking_render(batch, i)
-                # ***************** Mapping & Global BA*****************
+                # ***************** Mapping*****************
                 if i % self.config["mapping"]["map_every"] == 0:
                     self.current_frame_mapping(batch, i)
+                    # ***************** Global BA*****************
                     self.global_BA(batch, i)
 
                 # Add keyframe
-                # if i % self.config['mapping']['keyframe_every'] == 0 and i < 15:
-                # 前 20个图片没五张图片加一个关键帧
-                if i % self.config['mapping']['keyframe_every'] == 0 and i < 20:
-                    self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
-                    print('add keyframe:', i)
-                # 从第 20个图片开始,每 5 张图片使用信息增益进行一次关键帧选择
-                elif i % self.config['mapping']['keyframe_every'] == 0:
-                    downsampled_H, downsampled_W = (self.dataset.H // 4, self.dataset.W // 4)  # 只取 1/4 的点,
+
+                if i % self.config["active"]["active_iter"] == 0:
+                    downsampled_H, downsampled_W = (
+                        self.dataset.H // 2,
+                        self.dataset.W // 2,
+                    )  # 只取 1/4 的点,
                     # 原论文是 1/2的点, 但会出现 OOM
                     samples_num = downsampled_H * downsampled_W  # 采样点数量
                     # *********添加关键帧***************************
@@ -971,19 +973,22 @@ class CoSLAM:
                     indice = self.select_samples(
                         # 图像 H*W 368*496, samples=45632
                         # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
-                        self.dataset.H, self.dataset.W, samples_num)
+                        self.dataset.H,
+                        self.dataset.W,
+                        samples_num,
+                    )
                     indice_h, indice_w = (
                         indice % self.dataset.H,
-                        indice // self.dataset.H)
+                        indice // self.dataset.H,
+                    )
                     pres = []
                     posts = []
                     self.model.eval()
-                    holdout_loader = DataLoader(
-                        holdout_dataset, num_workers=self.config["data"]["num_workers"]
-                    )
+
                     for i, batch in enumerate(holdout_loader):
-                        # tqdm库在 pycharm 终端有显示错误
-                        print("image:", i + 1, "/", len(holdout_loader.dataset), "\r", end="")
+                        print(
+                            "image:", i, "/", len(holdout_loader.dataset), "\r", end=""
+                        )
 
                         rays_d_cam = (
                             batch["direction"]
@@ -1017,7 +1022,8 @@ class CoSLAM:
                         # 1,160000,1 新数据集r2(holdout数据集)的不确定度 beta, \beta^2(r_2)
                         uncert_pts = (
                                 rend_dict["raw"][..., -1].reshape(
-                                    -1, samples_num,
+                                    -1,
+                                    samples_num,
                                     self.config["training"]["n_samples_d"]
                                     + self.config["training"]["n_importance"]
                                     + self.config["training"]["n_range_d"],
@@ -1025,7 +1031,8 @@ class CoSLAM:
                                 + 1e-9
                         )
                         weight_pts = rend_dict["weights"].reshape(
-                            -1, samples_num,
+                            -1,
+                            samples_num,
                             self.config["training"]["n_samples_d"]  # 64
                             + self.config["training"]["n_importance"]  # 0
                             + self.config["training"]["n_range_d"],  # 21
@@ -1033,7 +1040,13 @@ class CoSLAM:
 
                         pre = uncert_pts.sum([1, 2])  # 1,160000,192->1
 
-                        post = (1.0 / (1.0 / uncert_pts + weight_pts * weight_pts / uncert_render)).sum([1, 2])
+                        post = (
+                                1.0
+                                / (
+                                        1.0 / uncert_pts
+                                        + weight_pts * weight_pts / uncert_render
+                                )
+                        ).sum([1, 2])
                         pres.append(pre)
                         posts.append(post)
 
@@ -1045,27 +1058,22 @@ class CoSLAM:
                         .cpu()
                         .numpy()
                     )
+                    # 将 hold_out_index 对应的图片从 holdout_datset 中删除,并加入到 train_dataset 中
                     hold_out_index = [0, 1, 2, 3]
-
-                    print("the top info gain Frame-ids: ", [holdout_dataset.frame_ids[i] for i in hold_out_index])
-                    # 选择信息增益最大的帧加入到 train_dataset 中
-                    top_info_gain_from_holdout = holdout_dataset.slice(hold_out_index)
-                    train_dataset = train_dataset + top_info_gain_from_holdout
-                    train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
-
-                    # 将信息增益最大的帧从 holdout_dataset 中删除
-                    holdout_dataset = holdout_dataset.slice_except(hold_out_index)
+                    holdout_dataset = [
+                        holdout_dataset[i]
+                        for i in range(len(holdout_dataset))
+                        if i not in hold_out_index
+                    ]
                     holdout_loader = DataLoader(
                         holdout_dataset, num_workers=self.config["data"]["num_workers"]
                     )
+                    train_loader = DataLoader(train_dataset, num_workers=4)
+                    # print('after evaluation:', i_train, i_holdout, hold_out_index)
                     self.model.train()
                     # **************************
-
-                    print("add keyframe Ids: ", end=" ")
-                    for batch in top_info_gain_from_holdout:
-                        self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config["mapping"]["filter_depth"])
-                        # 输出 self.keyframeDatabase.frame_ids的最后一个元素
-                        print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
+                    # self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config["mapping"]["filter_depth"])
+                    # print("add keyframe:", i)
 
                 if i % self.config["mesh"]["vis"] == 0:
                     self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])

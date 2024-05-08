@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import numpy as np
 from scipy.spatial.transform import Rotation
 from torch.utils.data import Dataset
+from torch.utils.data.dataset import ConcatDataset
 from tqdm import tqdm
 
 from datasets.utils import get_camera_rays, alphanum_key, as_intrinsics_matrix
@@ -199,39 +200,6 @@ class TUMDataset(BaseDataset):
     def __len__(self):
         return self.num_frames
 
-    # def delete(self, indices):
-    #     """Modify the dataset by selecting a subset of indices.
-    #     Args:
-    #         dataset (Dataset): The dataset to be modified.
-    #         indices (list): The indices of the dataset to be selected.
-    #     Returns:
-    #         Dataset: The modified dataset.
-    #     """
-    #     self.indices = [int(i) for i in indices]
-    #     self.poses = [self.poses[i] for i in indices]  # 保留classes属性
-    #     self.color_paths = [self.color_paths[i] for i in indices]
-    #     self.depth_paths = [self.depth_paths[i] for i in indices]
-    #     self.frame_ids = [self.frame_ids[i] for i in indices]
-    #     self.num_frames = len(self.frame_ids)
-    # 
-    # # 请实现函数__add__ 使得两个数据集可以相加
-    # def __add__(self, other):
-    #     """Add two datasets together.
-    #     Args:
-    #         other (Dataset): The dataset to be added.
-    #     Returns:
-    #         Dataset: The combined dataset.
-    #     """
-    #     # 请检查两个数据集是否是相同的类
-    #     if not isinstance(other, self.__class__):
-    #         raise ValueError("Only datasets of the same class can be added together.")
-    #     self.poses += other.poses
-    #     self.color_paths += other.color_paths
-    #     self.depth_paths += other.depth_paths
-    #     self.frame_ids += other.frame_ids
-    #     self.num_frames = len(self.frame_ids)
-    #     return self
-
     def __getitem__(self, index):
 
         color_path = self.color_paths[index]
@@ -294,8 +262,55 @@ class TUMDataset(BaseDataset):
         }
         return ret
 
-    def remove(self, index):
-        pass
+    def slice(self, indices):
+        """
+        Returns a new TUMDataset instance containing only the elements specified by the indices list.
+
+        Args:
+            indices (list of int): List of indices to include in the sliced dataset.
+
+        Returns:
+            TUMDataset: A new dataset instance with the specified subset of data.
+        """
+        new_dataset = copy.copy(self)
+
+        # Select the data subsets based on the provided indices
+        new_dataset.color_paths = [self.color_paths[i] for i in indices]
+        new_dataset.depth_paths = [self.depth_paths[i] for i in indices]
+        new_dataset.poses = [self.poses[i] for i in indices]
+
+        # Update the frame IDs and number of frames in the sliced dataset
+        new_dataset.frame_ids = [self.frame_ids[i] for i in indices]
+        new_dataset.num_frames = len(new_dataset.frame_ids)
+        # Since the data is already loaded and sliced, no need to load again
+        return new_dataset
+
+    def __add__(self, other):
+        """
+        返回一个新的 TUMDataset 实例，包含 self 和 other 的所有元素
+        """
+        # 检查other是否也是 TUMDataset 的实例
+        if not isinstance(other, TUMDataset):
+            return NotImplemented
+
+        new_dataset = copy.copy(self)
+        # Select the data subsets based on the provided indices
+        new_dataset.color_paths = self.color_paths + other.color_paths
+        new_dataset.depth_paths = self.depth_paths + other.depth_paths
+        new_dataset.poses = self.poses + other.poses
+        new_dataset.frame_ids = self.frame_ids + other.frame_ids
+        new_dataset.num_frames = len(new_dataset.frame_ids)
+
+        return new_dataset
+
+    def slice_except(self, indices):
+        """
+        Returns a new TUMDataset instance containing all the elements except those specified by the indices list.
+        返回除了 indices 以外的
+        """
+        all_indices = set(range(self.num_frames))
+        remaining_indices = list(all_indices - set(indices))
+        return self.slice(remaining_indices)
 
 
 class iPhoneDataset(BaseDataset):
@@ -939,13 +954,12 @@ class RealsenseDataset(BaseDataset):
                 c2w = torch.from_numpy(c2w).float()
                 self.poses.append(c2w)
 
-
-def slice_dataset(dataset, index):
-    subset = copy.copy(dataset)
-    # Manually assign selected data to the new dataset object
-    subset.color_paths = [dataset.color_paths[i] for i in index]
-    subset.depth_paths = [dataset.depth_paths[i] for i in index]
-    subset.poses = [dataset.poses[i] for i in index]
-    subset.frame_ids = [dataset.frame_ids[i] for i in index]
-    subset.num_frames = len(subset.frame_ids)
-    return subset
+# def slice_dataset(dataset, index):
+#     subset = copy.copy(dataset)
+#     # Manually assign selected data to the new dataset object
+#     subset.color_paths = [dataset.color_paths[i] for i in index]
+#     subset.depth_paths = [dataset.depth_paths[i] for i in index]
+#     subset.poses = [dataset.poses[i] for i in index]
+#     subset.frame_ids = [dataset.frame_ids[i] for i in index]
+#     subset.num_frames = len(subset.frame_ids)
+#     return subset

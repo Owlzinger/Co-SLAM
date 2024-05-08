@@ -15,7 +15,6 @@ import cv2
 
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from tqdm.rich import trange
 
 # Local imports
 import config
@@ -209,9 +208,9 @@ class CoSLAM:
         # model.eval()是利用到了所有网络连接。
 
         # Training
-        for i in trange(n_iters):  # 1000
+        for i in range(n_iters):  # 1000
             # ********************* 获得第0帧每个像素的颜色，深度，方向 *********************
-            # print(f"\r{i}/{n_iters}", end="")
+            print("iter:", i + 1, "/", n_iters, "\r", end="")
 
             self.map_optimizer.zero_grad()
             indice = self.select_samples(
@@ -876,19 +875,19 @@ class CoSLAM:
     def run(self):
         self.create_optimizer()
         dataset_size = len(self.dataset)
+        init_image = 20
         # 我想将 self.dataset 中的数据的前百分之 25的图片保存为训练集
         # 后百分之 75的图片保存为验证集
 
         # train_size = int(0.3 * dataset_size)  # 前百分之 30的图片作为训练集
         # holdout_size = dataset_size - train_size  # 后百分之 70的图片作为保留集
         # 前 20个图像作为训练集
-        train_dataset = torch.utils.data.Subset(self.dataset, range(0, 20))
+        self.train_dataset = torch.utils.data.Subset(self.dataset, range(0, init_image))
+        self.train_loader = DataLoader(self.train_dataset, num_workers=self.config["data"]["num_workers"])
+        self.holdout_dataset = torch.utils.data.Subset(self.dataset, range(init_image, dataset_size))
+        self.holdout_loader = DataLoader(self.holdout_dataset, num_workers=self.config["data"]["num_workers"])
 
-        train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
-
-        i_train = np.array(train_dataset.indices)
-
-        for i, batch in tqdm(enumerate(train_loader)):
+        for i, batch in tqdm(enumerate(self.train_loader)):
             # batch = {
             # 'frame_id': [1],
             # 'c2w': [1, 4, 4],
@@ -913,7 +912,7 @@ class CoSLAM:
                 key = cv2.waitKey(1)
 
             # First frame mapping
-            # *******建立初始的地图和位姿估计********
+            # *******初始的地图和位姿估计********
             if i == 0:
                 self.first_frame_mapping(batch, self.config["mapping"]["first_iters"])  # first_iters=1000
 
@@ -922,41 +921,41 @@ class CoSLAM:
             else:
                 # ***************** Tracking*****************
                 if self.config["tracking"]["iter_point"] > 0:  # 代码中是 False
-                    # *****通过点云来跟踪当前帧的相机位姿********
-                    self.tracking_pc(batch, i)
+                    self.tracking_pc(batch, i)  # 通过点云来跟踪当前帧的相机位姿
                 # 使用当前的 rgb 损失,深度损失,sdf 损失来跟踪当前帧的相机位姿
                 self.tracking_render(batch, i)
                 # ***************** Mapping*****************
                 if i % self.config["mapping"]["map_every"] == 0:
                     self.current_frame_mapping(batch, i)
-                    # ***************** Global BA*****************
                     self.global_BA(batch, i)
 
                 # Add keyframe
 
                 if i % self.config["active"]["active_iter"] == 0 and self.config["active"]["isActive"]:
+                    downsample_rate = 4
+                    # H和 W 变为原来的 1/4 , 原论文是 1/2的点, 但会出现 OOM
+                    samples_num = (self.dataset.H // downsample_rate) * (self.dataset.W // downsample_rate)  # 采样点数量
 
-                    downsampled_H, downsampled_W = self.dataset.H // 2, self.dataset.W // 2  # 只取 1/4 的点, 
-                    # 原论文是 1/2的点, 但会出现 OOM
-                    samples_num = downsampled_H * downsampled_W  # 采样点数量
-                    holdout_dataset = torch.utils.data.Subset(self.dataset, range(20, dataset_size))
-                    holdout_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
-                    # i_holdout = np.array(holdout_dataset.indices)
                     # *********添加关键帧***************************
                     # print('before evaluation:', i_train, i_holdout.min(), i_holdout.max())
                     # *******************************************
                     print("\nstart evaluation:")
                     indice = self.select_samples(
-                        # 图像 H*W 368*496, samples=45632
-                        # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
                         self.dataset.H, self.dataset.W, samples_num)
                     indice_h, indice_w = indice % self.dataset.H, indice // self.dataset.H
+                    """
+                    假设index [12, ...]
+                    列索引 (indice_w)：列索引可以通过取每个一维索引除以列数的余数得到。
+                    例如：12 % 10 = 2, 表示第12个索引在第2列。
+                    行索引 (indice_h)：每个索引除以列数的结果。
+                    例如：12 // 10 = 1
+                    """
                     pres = []
                     posts = []
                     self.model.eval()
 
-                    for i, batch in enumerate(holdout_loader):
-                        print("image:", i, "/", len(holdout_loader.dataset), "\r", end="")
+                    for i, batch in enumerate(self.holdout_loader):
+                        print("image:", i + 1, "/", len(self.holdout_dataset), "\r", end="")
 
                         rays_d_cam = (batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device))
                         target_s = batch["rgb"].squeeze(0)[indice_h, indice_w, :].to(self.device)
@@ -990,20 +989,30 @@ class CoSLAM:
 
                     pres = torch.cat(pres, 0)  # 40,
                     posts = torch.cat(posts, 0)  # 40
-                    diff = pres - posts
-                    hold_out_index = torch.topk(pres - posts, self.config["active"]["choose_k"])[1].cpu().numpy()
-                    # 将 hold_out_index 对应的图片从 holdout_datset 中删除,并加入到 train_dataset 中
-                    holdout_dataset = [
-                        holdout_dataset[i]
-                        for i in range(len(holdout_dataset))
-                        if i not in hold_out_index
-                    ]
-                    holdout_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
-                    # print('after evaluation:', i_train, i_holdout, hold_out_index)
+                    information_gain = pres - posts
+                    hold_out_index = torch.topk(information_gain, self.config["active"]["choose_k"])[1].cpu().numpy()
+                    hold_out_index = [5, 10, 15, 20]
+                    # 将 hold_out_index 对应的图片从 holdout_datset 中删除,并加入到 self.train_dataset 中
+                    top_information_gain_holdout_subdataset = torch.utils.data.Subset(self.holdout_dataset,
+                                                                                      hold_out_index)
+                    self.train_dataset = torch.utils.data.ConcatDataset(
+                        [self.train_dataset, top_information_gain_holdout_subdataset])
+                    self.holdout_dataset = torch.utils.data.Subset(self.holdout_dataset,
+                                                                   list(set(range(len(self.holdout_dataset))) - set(
+                                                                       hold_out_index)))
+
+                    # print('after evaluation:', self.train_dataset.datasets.frameid, , hold_out_index)
                     self.model.train()
                     # **************************
-                    self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config["mapping"]["filter_depth"])
-                    print("add keyframe:", i)
+                    # for i in hold_out_index:
+                    #     # 从self.holdout_loader加载对应的 batch
+                    # 
+                    #     self.keyframeDatabase.add_keyframe(batch[i],
+                    #                                        filter_depth=self.config["mapping"]["filter_depth"])
+                    # print("add keyframe:", i)
+                    self.train_loader = DataLoader(self.train_dataset, num_workers=self.config["data"]["num_workers"])
+                    self.holdout_loader = DataLoader(self.holdout_dataset,
+                                                     num_workers=self.config["data"]["num_workers"])
 
                 if i % self.config["mesh"]["vis"] == 0:
                     self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
@@ -1034,8 +1043,7 @@ class CoSLAM:
                         key = cv2.waitKey(1)
 
         model_savepath = os.path.join(
-            self.config["data"]["output"],
-            self.config["data"]["exp_name"],
+            self.config["data"]["output"], self.config["data"]["exp_name"],
             "checkpoint{}.pt".format(i),
         )
 
@@ -1081,4 +1089,4 @@ if __name__ == "__main__":
     slam = CoSLAM(cfg)
 
     slam.run()
-    # print(slam.keyframeDatabase.frame_ids)
+    print(slam.keyframeDatabase.frame_ids)
