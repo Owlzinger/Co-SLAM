@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 # os.environ['TCNN_CUDA_ARCHITECTURES'] = '86'
 
@@ -626,7 +627,7 @@ class CoSLAM():
             self.cur_map_optimizer = optim.Adam(params_cur_mapping, betas=(0.9, 0.99))
 
     def save_mesh(self, i, voxel_size=0.05):
-        mesh_savepath = os.path.join(self.config['data']['output'], self.config['data']['exp_name'],
+        mesh_savepath = os.path.join(save_path,
                                      'mesh_track{}.ply'.format(i))
         if self.config['mesh']['render_color']:
             color_func = self.model.render_surface_color
@@ -682,15 +683,15 @@ class CoSLAM():
                     self.save_mesh(i, voxel_size=self.config['mesh']['voxel_eval'])
                     pose_relative = self.convert_relative_pose()
                     pose_evaluation(self.pose_gt, self.est_c2w_data, 1,
-                                    os.path.join(self.config['data']['output'], self.config['data']['exp_name']), i)
+                                    os.path.join(save_path), i)
                     pose_evaluation(self.pose_gt, pose_relative, 1,
-                                    os.path.join(self.config['data']['output'], self.config['data']['exp_name']), i,
+                                    os.path.join(save_path), i,
                                     img='pose_r', name='output_relative.txt')
 
                     if cfg['mesh']['visualisation']:
                         cv2.namedWindow('Traj:'.format(), cv2.WINDOW_AUTOSIZE)
                         traj_image = cv2.imread(
-                            os.path.join(self.config['data']['output'], self.config['data']['exp_name'],
+                            os.path.join(save_path,
                                          "pose_r_{}.png".format(i)))
                         # best_traj_image = cv2.imread(os.path.join(best_logdir_scene, "pose_r_{}.png".format(i)))
                         # image_show = np.hstack((traj_image, best_traj_image))
@@ -698,7 +699,7 @@ class CoSLAM():
                         cv2.imshow('Traj:'.format(), image_show)
                         key = cv2.waitKey(1)
 
-        model_savepath = os.path.join(self.config['data']['output'], self.config['data']['exp_name'],
+        model_savepath = os.path.join(save_path,
                                       'checkpoint{}.pt'.format(i))
 
         self.save_ckpt(model_savepath)
@@ -706,9 +707,9 @@ class CoSLAM():
 
         pose_relative = self.convert_relative_pose()
         pose_evaluation(self.pose_gt, self.est_c2w_data, 1,
-                        os.path.join(self.config['data']['output'], self.config['data']['exp_name']), i)
+                        os.path.join(save_path), i)
         pose_evaluation(self.pose_gt, pose_relative, 1,
-                        os.path.join(self.config['data']['output'], self.config['data']['exp_name']), i, img='pose_r',
+                        os.path.join(save_path), i, img='pose_r',
                         name='output_relative.txt')
 
         # TODO: Evaluation of reconstruction
@@ -717,6 +718,8 @@ class CoSLAM():
 if __name__ == '__main__':
 
     print('Start running...')
+    current_time = datetime.now()
+    time_str = current_time.strftime("%m%d_%H%M")
     parser = argparse.ArgumentParser(
         description='Arguments for running the NICE-SLAM/iMAP*.'
     )
@@ -733,7 +736,7 @@ if __name__ == '__main__':
         cfg['data']['output'] = args.output
 
     print("Saving config and script...")
-    save_path = os.path.join(cfg["data"]["output"], cfg['data']['exp_name'])
+    save_path = os.path.join(cfg["data"]["output"], cfg['data']['exp_name'] + time_str)
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     shutil.copy("coslam.py", os.path.join(save_path, 'coslam.py'))
