@@ -1,4 +1,4 @@
-angledataset: 'tum'
+dataset: 'tum'
 
 data:
   downsample: 1
