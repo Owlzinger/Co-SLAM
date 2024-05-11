@@ -26,6 +26,14 @@ def coordinates(voxel_dim, device: torch.device, flatten=True):
 #### ####
 
 def getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolution=None):
+    """
+    x_max, x_min, y_max, y_min, z_max, z_min: bounding box of the scene 这些参数定义了三维空间中的边界框，即需要计算体素的空间范围。
+    voxel_size： optional，指每个体素的大小。如果提供了这个参数，将基于体素大小来计算每个轴上的点数。
+    resolution：optional，指定在每个轴上应有的点的数量。如果没有提供 voxel_size，将使用 resolution 来确定每个轴上的点。
+    Nx, Ny, Nz：每个轴上的点数/体素数量。
+    ret:
+        tx, ty, tz: 网格上点的坐标,等间距的列表。
+    """
     if not isinstance(x_max, float):
         x_max = float(x_max)
         x_min = float(x_min)
@@ -35,10 +43,12 @@ def getVoxels(x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolut
         z_min = float(z_min)
 
     if voxel_size is not None:
+        # voxel_size为体素的尺寸大小，体素的尺寸越大，下采样的倍数越大，点云也就越稀疏。
+        # voxel_size越小，会生成更细的网格和更多的点。
         Nx = round((x_max - x_min) / voxel_size + 0.0005)
         Ny = round((y_max - y_min) / voxel_size + 0.0005)
         Nz = round((z_max - z_min) / voxel_size + 0.0005)
-
+        # np.linspace(start, stop, num)
         tx = torch.linspace(x_min, x_max, Nx + 1)
         ty = torch.linspace(y_min, y_max, Ny + 1)
         tz = torch.linspace(z_min, z_max, Nz + 1)
@@ -65,6 +75,8 @@ def extract_mesh(query_fn, config, bounding_box, marching_cube_bound=None, color
                  resolution=None, isolevel=0.0, scene_name='', mesh_savepath=''):
     '''
     Extracts mesh from the scene model using marching cubes (Adapted from NeuralRGBD)
+    网格生成: 使用 Marching Cubes 算法，基于体素化的三维网格中的查询点，生成网格的顶点和面。
+    颜色处理: 根据配置决定是否对网格顶点着色，使用提供的颜色函数。默认不着色
     '''
     # Query network on dense 3d grid of points
     if marching_cube_bound is None:
@@ -110,7 +122,8 @@ def extract_mesh(query_fn, config, bounding_box, marching_cube_bound=None, color
     # Transform to metric units
     vertices[:, :3] = vertices[:, :3] / config['data']['sc_factor'] - config['data']['translation']
 
-    if color_func is not None and not config['mesh']['render_color']:
+    if color_func is not None and not config['mesh']['render_color']:  # False
+        # 默认这个
         if config['grid']['tcnn_encoding']:
             vert_flat = (torch.from_numpy(vertices).to(bounding_box) - bounding_box[:, 0]) / (
                     bounding_box[:, 1] - bounding_box[:, 0])

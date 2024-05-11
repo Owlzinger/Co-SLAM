@@ -11,7 +11,7 @@ data:
   datadir: data/TUM/rgbd_dataset_freiburg1_desk
   trainskip: 1
   output: output/TUM/fr_desk
-  exp_name: demo
+  exp_name: ac_demo
 
 mapping:
   sample: 2048
@@ -109,7 +109,7 @@ training:
 mesh:
   resolution: 512
   render_color: False
-  vis: 10 # 500
+  vis: 500
   voxel_eval: 0.05
   voxel_final: 0.03
   visualisation: False

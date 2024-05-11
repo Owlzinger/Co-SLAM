@@ -27,7 +27,8 @@ def coordinates(voxel_dim, device: torch.device, flatten=True):
 
 
 def getVoxels(
-        x_max, x_min, y_max, y_min, z_max, z_min, voxel_size=None, resolution=None
+        x_max, x_min, y_max, y_min, z_max, z_min,
+        voxel_size=None, resolution=None
 ):
     if not isinstance(x_max, float):
         x_max = float(x_max)
@@ -151,7 +152,7 @@ def extract_mesh(
             vertices[:, :3] / config["data"]["sc_factor"] - config["data"]["translation"]
     )
 
-    if color_func is not None and not config["mesh"]["render_color"]:
+    if color_func is not None and not config["mesh"]["render_color"]:  # False
         if config["grid"]["tcnn_encoding"]:
             vert_flat = (
                                 torch.from_numpy(vertices).to(bounding_box) - bounding_box[:, 0]

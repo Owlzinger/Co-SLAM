@@ -44,7 +44,7 @@ class KeyFrameDatabase(object):
             idxs = random.sample(range(0, self.H * self.W), self.num_rays_to_save)
         elif option == "filter_depth":
             valid_depth_mask = (rays[..., -1] > 0.0) & (
-                rays[..., -1] <= self.config["cam"]["depth_trunc"]
+                    rays[..., -1] <= self.config["cam"]["depth_trunc"]
             )
             rays_valid = rays[valid_depth_mask, :]  # [n_valid, 7]
             num_valid = len(rays_valid)
@@ -128,14 +128,14 @@ class KeyFrameDatabase(object):
 
     @torch.no_grad()
     def sample_overlap_keyframe(
-        self,
-        batch,
-        frame_id,
-        est_c2w_list,
-        k_frame,
-        n_samples=16,
-        n_pixel=100,
-        dataset=None,
+            self,
+            batch,
+            frame_id,
+            est_c2w_list,
+            k_frame,
+            n_samples=16,
+            n_pixel=100,
+            dataset=None,
     ):
         """
         NICE-SLAM strategy for selecting overlapping keyframe from all previous frames
@@ -162,7 +162,7 @@ class KeyFrameDatabase(object):
         far = target_d + 0.5
         z_vals = near * (1.0 - t_vals) + far * (t_vals)
         pts = (
-            rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
+                rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
         )  # [N_rays, N_samples, 3]
         pts_flat = pts.reshape(-1, 3).cpu().numpy()
 
@@ -192,10 +192,10 @@ class KeyFrameDatabase(object):
             uv = uv.astype(np.float32)
             edge = 20
             mask = (
-                (uv[:, 0] < self.config["cam"]["W"] - edge)
-                * (uv[:, 0] > edge)
-                * (uv[:, 1] < self.config["cam"]["H"] - edge)
-                * (uv[:, 1] > edge)
+                    (uv[:, 0] < self.config["cam"]["W"] - edge)
+                    * (uv[:, 0] > edge)
+                    * (uv[:, 1] < self.config["cam"]["H"] - edge)
+                    * (uv[:, 1] > edge)
             )
             mask = mask & (z[:, :, 0] < 0)
             mask = mask.reshape(-1)

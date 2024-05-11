@@ -23,10 +23,10 @@ import config
 
 from ActiveCoSLAM.ac_scene_rep import JointEncoding
 from ActiveCoSLAM.ac_dataset import get_dataset
+from ActiveCoSLAM.ac_utils import coordinates, extract_mesh, colormap_image
 
 # from model.scene_rep import JointEncoding
 from model.keyframe import KeyFrameDatabase
-from utils import coordinates, extract_mesh, colormap_image
 from tools.eval_ate import pose_evaluation
 from optimization.utils import (
     at_to_transform_matrix,
@@ -34,6 +34,7 @@ from optimization.utils import (
     matrix_to_axis_angle,
     matrix_to_quaternion,
 )
+from datetime import datetime
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
@@ -101,10 +102,10 @@ class CoSLAM:
         """
         Create the keyframe database
         """
+        # TODO 固定大小预分配的内存
         num_kf = int(
-            # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧
+            # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧, +1 是第一帧
             # self.dataset.num_frames = 592
-            # +1 应该是第一帧
             self.dataset.num_frames // self.config["mapping"]["keyframe_every"] + 1
         )
         print("#kf: ", num_kf)
@@ -203,7 +204,7 @@ class CoSLAM:
             loss: float
 
         """
-        # ********************* 读取第0帧的相机位姿 *********************
+        # 读取第0帧的相机位姿(真实值)
 
         print("First frame mapping...")
         c2w = batch["c2w"][0].to(self.device)
@@ -256,7 +257,8 @@ class CoSLAM:
             # rays_d_cam[..., None, :] 相机坐标系中的射线方向： [2048,1,3]
             # c2w[:3, :3] : 旋转矩阵    [3,3]
             # sum(x,-1) 在最后一个维度上进行求和
-
+            # NeRF代码是在相机坐标系下构建射线，然后再通过camera - to - world(c2w)
+            # 矩阵将射线变换到世界坐标系。
             # Forward
             # ********************* 前向传播: 得到rgb图，深度图，rgb损失，深度损失,sdf损失，fs损失 *********************
 
@@ -570,14 +572,17 @@ class CoSLAM:
         Predict current pose from previous pose using camera motion model
         """
         if frame_id == 1 or (not constant_speed):
+            # 第一帧
             c2w_est_prev = self.est_c2w_data[frame_id - 1].to(self.device)
             self.est_c2w_data[frame_id] = c2w_est_prev
 
         else:
+            # 从第二帧开始, 匀速运动假设
             c2w_est_prev_prev = self.est_c2w_data[frame_id - 2].to(self.device)
             c2w_est_prev = self.est_c2w_data[frame_id - 1].to(self.device)
             delta = c2w_est_prev @ c2w_est_prev_prev.float().inverse()
-            self.est_c2w_data[frame_id] = delta @ c2w_est_prev
+            # T_t-1*T_t-2^-1
+            self.est_c2w_data[frame_id] = delta @ c2w_est_prev  # T_t
 
         return self.est_c2w_data[frame_id]
 
@@ -879,8 +884,7 @@ class CoSLAM:
 
     def save_mesh(self, i, voxel_size=0.05):
         mesh_savepath = os.path.join(
-            self.config["data"]["output"],
-            self.config["data"]["exp_name"],
+            save_path,
             "mesh_track{}.ply".format(i),
         )
         if self.config["mesh"]["render_color"]:
@@ -954,14 +958,18 @@ class CoSLAM:
                     self.global_BA(batch, i)
 
                 # Add keyframe
-                # if i % self.config['mapping']['keyframe_every'] == 0 and i < 15:
-                # 前 20个图片没五张图片加一个关键帧
-                if i % self.config['mapping']['keyframe_every'] == 0 and i < 20:
-                    self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
-                    print('add keyframe:', i)
+                # 前 20 个图片每五张图片加一个关键帧
+                if i % self.config["mapping"]["keyframe_every"] == 0 and i < 20:
+                    self.keyframeDatabase.add_keyframe(
+                        batch, filter_depth=self.config["mapping"]["filter_depth"]
+                    )
+                    print("add keyframe:", i)
                 # 从第 20个图片开始,每 5 张图片使用信息增益进行一次关键帧选择
-                elif i % self.config['mapping']['keyframe_every'] == 0:
-                    downsampled_H, downsampled_W = (self.dataset.H // 4, self.dataset.W // 4)  # 只取 1/4 的点,
+                elif i % self.config["mapping"]["keyframe_every"] == 0:
+                    downsampled_H, downsampled_W = (
+                        self.dataset.H // 4,
+                        self.dataset.W // 4,
+                    )  # 只取 1/4 的点,
                     # 原论文是 1/2的点, 但会出现 OOM
                     samples_num = downsampled_H * downsampled_W  # 采样点数量
                     # *********添加关键帧***************************
@@ -971,19 +979,28 @@ class CoSLAM:
                     indice = self.select_samples(
                         # 图像 H*W 368*496, samples=45632
                         # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
-                        self.dataset.H, self.dataset.W, samples_num)
+                        self.dataset.H,
+                        self.dataset.W,
+                        samples_num,
+                    )
                     indice_h, indice_w = (
                         indice % self.dataset.H,
-                        indice // self.dataset.H)
+                        indice // self.dataset.H,
+                    )
                     pres = []
                     posts = []
                     self.model.eval()
-                    holdout_loader = DataLoader(
-                        holdout_dataset, num_workers=self.config["data"]["num_workers"]
-                    )
+                    holdout_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
                     for i, batch in enumerate(holdout_loader):
                         # tqdm库在 pycharm 终端有显示错误
-                        print("image:", i + 1, "/", len(holdout_loader.dataset), "\r", end="")
+                        print(
+                            "image:",
+                            i + 1,
+                            "/",
+                            len(holdout_loader.dataset),
+                            "\r",
+                            end="",
+                        )
 
                         rays_d_cam = (
                             batch["direction"]
@@ -1017,7 +1034,8 @@ class CoSLAM:
                         # 1,160000,1 新数据集r2(holdout数据集)的不确定度 beta, \beta^2(r_2)
                         uncert_pts = (
                                 rend_dict["raw"][..., -1].reshape(
-                                    -1, samples_num,
+                                    -1,
+                                    samples_num,
                                     self.config["training"]["n_samples_d"]
                                     + self.config["training"]["n_importance"]
                                     + self.config["training"]["n_range_d"],
@@ -1025,7 +1043,8 @@ class CoSLAM:
                                 + 1e-9
                         )
                         weight_pts = rend_dict["weights"].reshape(
-                            -1, samples_num,
+                            -1,
+                            samples_num,
                             self.config["training"]["n_samples_d"]  # 64
                             + self.config["training"]["n_importance"]  # 0
                             + self.config["training"]["n_range_d"],  # 21
@@ -1033,7 +1052,13 @@ class CoSLAM:
 
                         pre = uncert_pts.sum([1, 2])  # 1,160000,192->1
 
-                        post = (1.0 / (1.0 / uncert_pts + weight_pts * weight_pts / uncert_render)).sum([1, 2])
+                        post = (
+                                1.0
+                                / (
+                                        1.0 / uncert_pts
+                                        + weight_pts * weight_pts / uncert_render
+                                )
+                        ).sum([1, 2])
                         pres.append(pre)
                         posts.append(post)
 
@@ -1041,13 +1066,14 @@ class CoSLAM:
                     posts = torch.cat(posts, 0)  # 40
                     diff = pres - posts
                     hold_out_index = (
-                        torch.topk(pres - posts, self.config["active"]["choose_k"])[1]
-                        .cpu()
-                        .numpy()
+                        # torch.topk(pres - posts, self.config["active"]["choose_k"])[1]
+                        torch.topk(pres - posts, 10)[1].cpu().numpy()
                     )
-                    hold_out_index = [0, 1, 2, 3]
 
-                    print("the top info gain Frame-ids: ", [holdout_dataset.frame_ids[i] for i in hold_out_index])
+                    print(
+                        "the top info gain Frame-ids: ",
+                        [holdout_dataset.frame_ids[i] for i in hold_out_index],
+                    )
                     # 选择信息增益最大的帧加入到 train_dataset 中
                     top_info_gain_from_holdout = holdout_dataset.slice(hold_out_index)
                     train_dataset = train_dataset + top_info_gain_from_holdout
@@ -1055,43 +1081,29 @@ class CoSLAM:
 
                     # 将信息增益最大的帧从 holdout_dataset 中删除
                     holdout_dataset = holdout_dataset.slice_except(hold_out_index)
-                    holdout_loader = DataLoader(
-                        holdout_dataset, num_workers=self.config["data"]["num_workers"]
-                    )
+                    holdout_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
                     self.model.train()
                     # **************************
 
-                    print("add keyframe Ids: ", end=" ")
-                    for batch in top_info_gain_from_holdout:
-                        self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config["mapping"]["filter_depth"])
-                        # 输出 self.keyframeDatabase.frame_ids的最后一个元素
-                        print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
+                    # print("add keyframe Ids: ", end="")
+                    # for batch in top_info_gain_from_holdout:
+                    #     self.keyframeDatabase.add_keyframe(
+                    #         batch, filter_depth=self.config["mapping"]["filter_depth"]
+                    #     )
+                    #     # 输出 self.keyframeDatabase.frame_ids的最后一个元素
+                    #     print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
 
                 if i % self.config["mesh"]["vis"] == 0:
                     self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
                     pose_relative = self.convert_relative_pose()
-                    pose_evaluation(
-                        self.pose_gt,
-                        self.est_c2w_data,
-                        1,
-                        os.path.join(
-                            self.config["data"]["output"],
-                            self.config["data"]["exp_name"],
-                        ),
-                        i,
-                    )
-                    pose_evaluation(
-                        self.pose_gt,
-                        pose_relative,
-                        1,
-                        os.path.join(
-                            self.config["data"]["output"],
-                            self.config["data"]["exp_name"],
-                        ),
-                        i,
-                        img="pose_r",
-                        name="output_relative.txt",
-                    )
+                    pose_evaluation(self.pose_gt, self.est_c2w_data, 1,
+                                    os.path.join(save_path),
+                                    i)
+                    pose_evaluation(self.pose_gt, pose_relative, 1,
+                                    os.path.join(save_path
+                                                 ),
+                                    i, img="pose_r", name="output_relative.txt",
+                                    )
 
                     if cfg["mesh"]["visualisation"]:
                         cv2.namedWindow("Traj:".format(), cv2.WINDOW_AUTOSIZE)
@@ -1109,8 +1121,7 @@ class CoSLAM:
                         key = cv2.waitKey(1)
 
         model_savepath = os.path.join(
-            self.config["data"]["output"],
-            self.config["data"]["exp_name"],
+            save_path,
             "checkpoint{}.pt".format(i),
         )
 
@@ -1118,25 +1129,14 @@ class CoSLAM:
         self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_final"])
 
         pose_relative = self.convert_relative_pose()
+        pose_evaluation(self.pose_gt, self.est_c2w_data, 1,
+                        os.path.join(save_path),
+                        i)
         pose_evaluation(
-            self.pose_gt,
-            self.est_c2w_data,
-            1,
+            self.pose_gt, pose_relative, 1,
             os.path.join(
-                self.config["data"]["output"], self.config["data"]["exp_name"]
-            ),
-            i,
-        )
-        pose_evaluation(
-            self.pose_gt,
-            pose_relative,
-            1,
-            os.path.join(
-                self.config["data"]["output"], self.config["data"]["exp_name"]
-            ),
-            i,
-            img="pose_r",
-            name="output_relative.txt",
+                save_path
+            ), i, img="pose_r", name="output_relative.txt"
         )
 
         # TODO: Evaluation of reconstruction
@@ -1144,20 +1144,15 @@ class CoSLAM:
 
 if __name__ == "__main__":
     print("Start running...")
-    parser = argparse.ArgumentParser(
-        description="Arguments for running the NICE-SLAM/iMAP*."
-    )
+    current_time = datetime.now()
+    time_str = current_time.strftime("%m%d_%H%M")
+
+    parser = argparse.ArgumentParser(description="Arguments for running the NICE-SLAM/iMAP*.")
     parser.add_argument("--config", type=str, help="Path to config file.")
-    parser.add_argument(
-        "--input_folder",
-        type=str,
-        help="input folder, this have higher priority, can overwrite the one in config file",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        help="output folder, this have higher priority, can overwrite the one in config file",
-    )
+    parser.add_argument("--input_folder", type=str,
+                        help="input folder, this have higher priority, can overwrite the one in config file", )
+    parser.add_argument("--output", type=str,
+                        help="output folder, this have higher priority, can overwrite the one in config file")
 
     args = parser.parse_args()
 
@@ -1166,7 +1161,7 @@ if __name__ == "__main__":
         cfg["data"]["output"] = args.output
 
     print("Saving config and script...")
-    save_path = os.path.join(cfg["data"]["output"], cfg["data"]["exp_name"])
+    save_path = os.path.join(cfg["data"]["output"], cfg["data"]["exp_name"] + time_str)
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     shutil.copy("coslam.py", os.path.join(save_path, "coslam.py"))

@@ -62,7 +62,8 @@ class BaseDataset(Dataset):
         self.ignore_h = cfg['tracking']['ignore_edge_H']
 
         self.total_pixels = (self.H - self.crop_size * 2) * (self.W - self.crop_size * 2)
-        self.num_rays_to_save = int(self.total_pixels * cfg['mapping']['n_pixels'])
+        self.num_rays_to_save = int(
+            self.total_pixels * cfg['mapping']['n_pixels'])  # n_pixels: 0.05 # num of pixels saved for each frame
         #  cfg['mapping']['n_pixels']: 0.05
 
     def __len__(self):

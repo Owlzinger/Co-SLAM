@@ -82,6 +82,7 @@ class CoSLAM():
         '''
         Create the keyframe database
         '''
+        # TODO: 不是每五张选一张
         num_kf = int(self.dataset.num_frames // self.config['mapping']['keyframe_every'] + 1)
         print('#kf:', num_kf)
         print('#Pixels to save:', self.dataset.num_rays_to_save)
@@ -197,7 +198,7 @@ class CoSLAM():
 
         # First frame will always be a keyframe
         self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
-        if self.config['mapping']['first_mesh']:
+        if self.config['mapping']['first_mesh']:  # True
             self.save_mesh(0)
 
         print('First frame mapping done')
@@ -627,8 +628,7 @@ class CoSLAM():
             self.cur_map_optimizer = optim.Adam(params_cur_mapping, betas=(0.9, 0.99))
 
     def save_mesh(self, i, voxel_size=0.05):
-        mesh_savepath = os.path.join(save_path,
-                                     'mesh_track{}.ply'.format(i))
+        mesh_savepath = os.path.join(save_path, 'mesh_track{}.ply'.format(i))
         if self.config['mesh']['render_color']:
             color_func = self.model.render_surface_color
         else:

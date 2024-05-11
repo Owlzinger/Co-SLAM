@@ -43,8 +43,9 @@ class KeyFrameDatabase(object):
         if option == "random":
             idxs = random.sample(range(0, self.H * self.W), self.num_rays_to_save)
         elif option == "filter_depth":
+            # 筛选深度在指定范围内的射线
             valid_depth_mask = (rays[..., -1] > 0.0) & (
-                rays[..., -1] <= self.config["cam"]["depth_trunc"]
+                    rays[..., -1] <= self.config["cam"]["depth_trunc"]
             )
             rays_valid = rays[valid_depth_mask, :]  # [n_valid, 7]
             num_valid = len(rays_valid)
@@ -69,12 +70,18 @@ class KeyFrameDatabase(object):
         Add keyframe rays to the keyframe database
         """
         # batch direction (Bs=1, H*W, 3)
+        # batch = {
+        # 'frame_id': [1],
+        # 'c2w': [1, 4, 4],
+        # 'rgb': [1, H, W, 3], 1*368*496*3
+        # 'depth': [1, H, W, 1], 1*368*496
+        # 'direction': [1, H, W, 3]} 1*368*496*3
 
         rays = torch.cat(
             [batch["direction"], batch["rgb"], batch["depth"][..., None]], dim=-1
-        )
-        rays = rays.reshape(1, -1, rays.shape[-1])
-        # Pixel Sampling 对应 Sec. 2.3, 3.1
+        )  # 4*368*496*(3+1+3)  给 depth 的最后加一维, 并把最后一维合并
+        rays = rays.reshape(1, -1, rays.shape[-1])  # 1*(368*496)*7 只保留第一维和最后一维,中间的乘起来
+        #  Pixel sampling 5%的像素
         if filter_depth:
             rays = self.sample_single_keyframe_rays(rays, "filter_depth")
         else:
@@ -83,7 +90,7 @@ class KeyFrameDatabase(object):
         if not isinstance(batch["frame_id"], torch.Tensor):
             batch["frame_id"] = torch.tensor([batch["frame_id"]])
 
-        self.attach_ids(batch["frame_id"])
+        self.attach_ids(batch["frame_id"])  # 初始化 kFDB 的时候
 
         # Store the rays
         self.rays[len(self.frame_ids) - 1] = rays
@@ -123,14 +130,14 @@ class KeyFrameDatabase(object):
 
     @torch.no_grad()
     def sample_overlap_keyframe(
-        self,
-        batch,
-        frame_id,
-        est_c2w_list,
-        k_frame,
-        n_samples=16,
-        n_pixel=100,
-        dataset=None,
+            self,
+            batch,
+            frame_id,
+            est_c2w_list,
+            k_frame,
+            n_samples=16,
+            n_pixel=100,
+            dataset=None,
     ):
         """
         NICE-SLAM strategy for selecting overlapping keyframe from all previous frames
@@ -157,7 +164,7 @@ class KeyFrameDatabase(object):
         far = target_d + 0.5
         z_vals = near * (1.0 - t_vals) + far * (t_vals)
         pts = (
-            rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
+                rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
         )  # [N_rays, N_samples, 3]
         pts_flat = pts.reshape(-1, 3).cpu().numpy()
 
@@ -187,10 +194,10 @@ class KeyFrameDatabase(object):
             uv = uv.astype(np.float32)
             edge = 20
             mask = (
-                (uv[:, 0] < self.config["cam"]["W"] - edge)
-                * (uv[:, 0] > edge)
-                * (uv[:, 1] < self.config["cam"]["H"] - edge)
-                * (uv[:, 1] > edge)
+                    (uv[:, 0] < self.config["cam"]["W"] - edge)
+                    * (uv[:, 0] > edge)
+                    * (uv[:, 1] < self.config["cam"]["H"] - edge)
+                    * (uv[:, 1] > edge)
             )
             mask = mask & (z[:, :, 0] < 0)
             mask = mask.reshape(-1)
