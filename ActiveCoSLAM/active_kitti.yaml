@@ -1,6 +1,6 @@
 # 原始配置分为,tum.yaml以及具体场景的yaml类似 fr1_desk.yaml
 # 本配置文件继承自tum.yaml,并将 fr1_desk.yaml中的相机参数cam以及 mapping,data覆盖到了本配置文件中
-dataset: 'tum'
+dataset: 'kitti'
 
 data:
   downsample: 1
@@ -8,7 +8,9 @@ data:
   translation: 0
   num_workers: 4
   # inherit_from: configs/Tum/tum.yaml
-  datadir: data/TUM/rgbd_dataset_freiburg1_desk
+  datadir: dump/
+  sequence_length: 3
+  # datadir: /home/aneins/Codes/dataset/TUM/rgbd_dataset_freiburg1_desk
   trainskip: 1
   output: output/TUM/fr_desk
   exp_name: ac_demo

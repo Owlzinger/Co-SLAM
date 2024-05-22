@@ -309,6 +309,266 @@ class TUMDataset(BaseDataset):
         return self.slice(remaining_indices)
 
 
+class KITTIDataset2(BaseDataset):
+    def __init__(self, cfg, basedir, sequence_number, trainskip=1,
+                 downsample_factor=1, translation=0.0,
+                 sc_factor=1., crop=0, load=True):
+        super(KITTIDataset, self).__init__(cfg)
+
+        self.config = cfg
+        self.basedir = basedir
+        self.sequence_number = sequence_number
+        self.trainskip = trainskip
+        self.downsample_factor = downsample_factor
+        self.translation = translation
+        self.sc_factor = sc_factor
+        self.crop = crop
+
+        self.color_paths, self.depth_paths, self.poses = self.load_kitti(
+            basedir, sequence_number, frame_rate=32)
+
+        self.frame_ids = range(0, len(self.color_paths))
+        self.num_frames = len(self.frame_ids)
+
+        self.crop_size = cfg['cam']['crop_size'] if 'crop_size' in cfg['cam'] else None
+
+        self.rays_d = None
+        sx = self.crop_size[1] / self.W
+        sy = self.crop_size[0] / self.H
+        self.fx = sx * self.fx
+        self.fy = sy * self.fy
+        self.cx = sx * self.cx
+        self.cy = sy * self.cy
+        self.W = self.crop_size[1]
+        self.H = self.crop_size[0]
+
+        if self.config['cam']['crop_edge'] > 0:
+            self.H -= self.config['cam']['crop_edge'] * 2
+            self.W -= self.config['cam']['crop_edge'] * 2
+            self.cx -= self.config['cam']['crop_edge']
+            self.cy -= self.config['cam']['crop_edge']
+
+    def pose_matrix_from_quaternion(self, pvec):
+        """ convert 4x4 pose matrix to (t, q) """
+        from scipy.spatial.transform import Rotation
+
+        pose = np.eye(4)
+        pose[:3, :3] = Rotation.from_quat(pvec[3:]).as_matrix()
+        pose[:3, 3] = pvec[:3]
+        return pose
+
+    def associate_frames(self, tstamp_image, tstamp_pose, max_dt=0.08):
+        """ pair images and poses """
+        associations = []
+        for i, t in enumerate(tstamp_image):
+            k = np.argmin(np.abs(tstamp_pose - t))
+            if np.abs(tstamp_pose[k] - t) < max_dt:
+                associations.append((i, k))
+
+        return associations
+
+    def parse_list(self, filepath, skiprows=0):
+        """ read list data """
+        data = np.loadtxt(filepath, delimiter=' ', dtype=np.unicode_, skiprows=skiprows)
+        return data
+
+    def load_kitti(self, datapath, sequence_number, frame_rate=-1):
+        """ read video data in KITTI format """
+        pose_list = os.path.join(datapath, 'poses', f'{sequence_number:02d}.txt')
+        image_list = os.path.join(datapath, 'sequences', f'{sequence_number:02d}', 'image_2')
+        depth_list = os.path.join(datapath, 'sequences', f'{sequence_number:02d}',
+                                  'image_3')  # Assumes depth images are stored similarly
+
+        image_data = sorted(os.listdir(image_list))
+        depth_data = sorted(os.listdir(depth_list))
+        pose_data = np.loadtxt(pose_list).reshape(-1, 3, 4)
+
+        tstamp_image = np.array([float(name.split('.')[0]) for name in image_data])
+        tstamp_pose = np.arange(len(pose_data))
+        associations = self.associate_frames(tstamp_image, tstamp_pose)
+
+        indices = [0]
+        for i in range(1, len(associations)):
+            t0 = tstamp_image[associations[indices[-1]][0]]
+            t1 = tstamp_image[associations[i][0]]
+            if t1 - t0 > 1.0 / frame_rate:
+                indices += [i]
+
+        images, poses, depths = [], [], []
+        for ix in tqdm(indices, desc='loading images depths poses'):
+            (i, k) = associations[ix]
+            images.append(os.path.join(image_list, image_data[i]))
+            depths.append(os.path.join(depth_list, depth_data[i]))
+
+            pose = np.eye(4)
+            pose[:3, :4] = pose_data[k]
+            pose[:3, 1] *= -1
+            pose[:3, 2] *= -1
+            pose = torch.from_numpy(pose).float()
+            poses.append(pose)
+
+        return images, depths, poses
+
+    def __len__(self):
+        return self.num_frames
+
+    def __getitem__(self, index):
+        color_path = self.color_paths[index]
+        depth_path = self.depth_paths[index]
+
+        color_data = cv2.imread(color_path)
+        if '.png' in depth_path:
+            depth_data = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+        elif '.exr' in depth_path:
+            raise NotImplementedError()
+        if self.distortion is not None:
+            K = as_intrinsics_matrix([self.config['cam']['fx'],
+                                      self.config['cam']['fy'],
+                                      self.config['cam']['cx'],
+                                      self.config['cam']['cy']])
+            color_data = cv2.undistort(color_data, K, self.distortion)
+
+        color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
+        color_data = color_data / 255.
+        depth_data = depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
+
+        H, W = depth_data.shape
+        color_data = cv2.resize(color_data, (W, H))
+
+        if self.downsample_factor > 1:
+            H = H // self.downsample_factor
+            W = W // self.downsample_factor
+            self.fx = self.fx // self.downsample_factor
+            self.fy = self.fy // self.downsample_factor
+            color_data = cv2.resize(color_data, (W, H), interpolation=cv2.INTER_AREA)
+            depth_data = cv2.resize(depth_data, (W, H), interpolation=cv2.INTER_NEAREST)
+
+        if self.rays_d is None:
+            self.rays_d = get_camera_rays(self.H, self.W, self.fx, self.fy, self.cx, self.cy)
+
+        color_data = torch.from_numpy(color_data.astype(np.float32))
+        depth_data = torch.from_numpy(depth_data.astype(np.float32))
+
+        if self.crop_size is not None:
+            color_data = color_data.permute(2, 0, 1)
+            color_data = F.interpolate(
+                color_data[None], self.crop_size, mode='bilinear', align_corners=True)[0]
+            depth_data = F.interpolate(
+                depth_data[None, None], self.crop_size, mode='nearest')[0, 0]
+            color_data = color_data.permute(1, 2, 0).contiguous()
+
+        edge = self.config['cam']['crop_edge']
+        if edge > 0:
+            color_data = color_data[edge:-edge, edge:-edge]
+            depth_data = depth_data[edge:-edge, edge:-edge]
+
+        ret = {
+            "frame_id": self.frame_ids[index],
+            "c2w": self.poses[index],
+            "rgb": color_data,
+            "depth": depth_data,
+            "direction": self.rays_d
+        }
+        return ret
+
+    def slice(self, indices):
+        new_dataset = copy.copy(self)
+        new_dataset.color_paths = [self.color_paths[i] for i in indices]
+        new_dataset.depth_paths = [self.depth_paths[i] for i in indices]
+        new_dataset.poses = [self.poses[i] for i in indices]
+        new_dataset.frame_ids = [self.frame_ids[i] for i in indices]
+        new_dataset.num_frames = len(new_dataset.frame_ids)
+        return new_dataset
+
+    def __add__(self, other):
+        if not isinstance(other, KITTIDataset):
+            return NotImplemented
+
+        new_dataset = copy.copy(self)
+        new_dataset.color_paths = self.color_paths + other.color_paths
+        new_dataset.depth_paths = self.depth_paths + other.depth_paths
+        new_dataset.poses = self.poses + other.poses
+        new_dataset.frame_ids = self.frame_ids + other.frame_ids
+        new_dataset.num_frames = len(new_dataset.frame_ids)
+        return new_dataset
+
+    def slice_except(self, indices):
+        all_indices = set(range(self.num_frames))
+        remaining_indices = list(all_indices - set(indices))
+        return self.slice(remaining_indices)
+
+
+import os
+import numpy as np
+import pykitti
+import torch
+from torch.utils.data import Dataset
+from PIL import Image
+
+
+class KITTIDataset(Dataset):
+    def __init__(self, base_dir, sequence, calib_dir=None):
+        """
+        Args:
+            base_dir (str): Path to the base directory of the KITTI dataset.
+            sequence (str): Sequence id to load (e.g., '00').
+            calib_dir (str, optional): Path to the calibration directory.
+        """
+        self.dataset = pykitti.odometry(base_dir, sequence, frames=None)
+        if calib_dir is not None:
+            self.dataset.load_calib(calib_dir)
+        self.sequence = sequence
+
+    def __len__(self):
+        return len(self.dataset.poses)
+
+    def __getitem__(self, index):
+        frame_id = index
+        pose = self.dataset.poses[index]
+        rgb = self._load_image(index)
+        rays_direction = self._compute_rays_direction(pose)
+
+        return {
+            'frame_id': frame_id,
+            'c2w': pose,
+            'rgb': rgb,
+            'depth': None,  # No depth data available
+            'direction': rays_direction
+        }
+
+    def _load_image(self, index):
+        """
+        Helper function to load images from the dataset.
+        Args:
+            index (int): Index of the image to load.
+        Returns:
+            torch.Tensor: Loaded image as a tensor.
+        """
+        img_file = os.path.join(self.dataset.sequence_path, 'image_2', '{:06d}.png'.format(index))
+        img = Image.open(img_file)
+        img = img.convert('RGB')
+        img = np.array(img, dtype=np.float32)
+        img = torch.from_numpy(img).permute(2, 0, 1) / 255.0  # Normalize to [0, 1]
+
+        return img
+
+    def _compute_rays_direction(self, pose):
+        """
+        Compute rays direction for the given pose.
+        Args:
+            pose (np.ndarray): 4x4 pose matrix.
+        Returns:
+            torch.Tensor: Computed rays direction.
+        """
+        rays_direction = pose[:3, :3].dot(np.array([0, 0, 1]))  # Assuming the ray direction is along z-axis
+        return torch.from_numpy(rays_direction).float()
+
+
+# Example usage:
+# dataset = KITTIDataset(base_dir='/path/to/kitti/dataset', sequence='00')
+# data = dataset[0]
+# print(data)
+
 if __name__ == '__main__':
     # main function
     cfg = {'dataset': 'tum',
@@ -343,7 +603,9 @@ if __name__ == '__main__':
                     'visualisation': False},
            'active': {'isActive': True, 'active_iter': 10, 'init_image': 10, 'choose_k': 10, 'w': 0.01,
                       'downsample_rate': 2, 'beta_min': 0.01}}
-    data = TUMDataset(cfg, basedir="/home/aneins/Codes/Co-SLAM/data/TUM/rgbd_dataset_freiburg1_desk")
+    # data2 = TUMDataset(cfg, basedir="/home/aneins/Codes/Co-SLAM/data/TUM/rgbd_dataset_freiburg1_desk")
+    dataset = KITTIDataset("/home/aneins/Codes/dataset/KITTI/odometry/", "03")
+    data = dataset[0]
     train = data.slice(np.arange(0, 5))
     holdout = data.slice(np.arange(5, 10))
     c = holdout + train
