@@ -103,15 +103,15 @@ class CoSLAM:
         Create the keyframe database
         """
         # TODO 固定大小预分配的内存
-        num_kf = int(
-            # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧, +1 是第一帧
-            # self.dataset.num_frames = 592
-            self.dataset.num_frames // self.config["mapping"]["keyframe_every"] + 1
-        )
-        print("#kf: ", num_kf)
+        # num_kf = int(
+        #     # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧, +1 是第一帧
+        #     # self.dataset.num_frames = 592
+        #     self.dataset.num_frames // self.config["mapping"]["keyframe_every"] + 1
+        # )
+        # print("#kf: ", num_kf)
         # num_rays_to_save= total pixel *  5% (下采样)
         print("#Pixels to save: ", self.dataset.num_rays_to_save)
-        return KeyFrameDatabase(config, self.dataset.H, self.dataset.W, num_kf, self.dataset.num_rays_to_save,
+        return KeyFrameDatabase(config, self.dataset.H, self.dataset.W, self.dataset.num_rays_to_save,
                                 self.device)
 
     def load_gt_pose(self):

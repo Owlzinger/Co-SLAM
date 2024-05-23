@@ -24,9 +24,9 @@ import config
 from ActiveCoSLAM.ac_scene_rep import JointEncoding
 from ActiveCoSLAM.ac_dataset import get_dataset
 from ActiveCoSLAM.ac_utils import coordinates, extract_mesh, colormap_image
+from ActiveCoSLAM.ac_keyframe import KeyFrameDatabase
 
 # from model.scene_rep import JointEncoding
-from model.keyframe import KeyFrameDatabase
 from tools.eval_ate import pose_evaluation
 from optimization.utils import (
     at_to_transform_matrix,
@@ -104,10 +104,10 @@ class CoSLAM:
         """
         # TODO 固定大小预分配的内存
         num_kf = int(
-            # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧, +1 是第一帧
-            # self.dataset.num_frames = 592
+            # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧, +1 是第一帧 # self.dataset.num_frames = 592
             self.dataset.num_frames // self.config["mapping"]["keyframe_every"] + 1
         )
+        num_kf = 200
         print("#kf: ", num_kf)
         # num_rays_to_save= total pixel *  5% (下采样)
         print("#Pixels to save: ", self.dataset.num_rays_to_save)
@@ -417,9 +417,13 @@ class CoSLAM:
 
         # 获取所有关键帧的位姿和 id
         # frame ids for all KFs, used for update poses after optimization
-        frame_ids_all = torch.tensor(
-            list(range(0, cur_frame_id, self.config["mapping"]["keyframe_every"]))
-        )
+        # TODO 可能和越界有关
+        # 如果 self.keyframeDatabase.keyframe_list为空,则添加一个 0,否则返回 self.keyframeDatabase.keyframe_list
+        if len(self.keyframeDatabase.key_frame_list) < 1:
+            self.keyframeDatabase.key_frame_list.append(0)
+            frame_ids_all = self.keyframeDatabase.key_frame_list
+        else:
+            frame_ids_all = self.keyframeDatabase.key_frame_list
 
         if len(self.keyframeDatabase.frame_ids) < 2:
             # 如果关键帧库的数量小于 2, 直接使用这些位姿,不做挑选
@@ -501,11 +505,12 @@ class CoSLAM:
             rays_d = torch.sum(
                 rays_d_cam[..., None, None, :] * poses_all[ids_all, None, :3, :3], -1
             )
-            rays_o = (
-                poses_all[ids_all, None, :3, -1]
-                .repeat(1, rays_d.shape[1], 1)
-                .reshape(-1, 3)
-            )
+            # Ensure all indices are within the valid range
+            assert ids_all.max() < poses_all.shape[0], "Index out of bounds ids_all.max()"
+            assert ids_all.min() >= 0, "Index out of bounds ids_all.min()"
+
+            # Now you can safely use ids_all as indices
+            rays_o = (poses_all[ids_all, None, :3, -1].repeat(1, rays_d.shape[1], 1).reshape(-1, 3))
             rays_d = rays_d.reshape(-1, 3)
 
             ret = self.model.forward(rays_o, rays_d, target_s, target_d)
@@ -521,10 +526,7 @@ class CoSLAM:
                     print("Wait update")
                 self.map_optimizer.zero_grad()
 
-            if (
-                    pose_optimizer is not None
-                    and (i + 1) % cfg["mapping"]["pose_accum_step"] == 0
-            ):
+            if pose_optimizer is not None and (i + 1) % cfg["mapping"]["pose_accum_step"] == 0:
                 # 姿态优化器在每个 pose_accum_step(5步)之后更新一次姿态参数。
                 pose_optimizer.step()
                 # get SE3 poses to do forward pass
@@ -907,11 +909,10 @@ class CoSLAM:
 
         holdout_dataset = self.dataset.slice(range(init_image, dataset_size))
         # 循环次数= (总数-初始数)/每次添加的数
-        n_iter = (dataset_size - init_image) / self.config["active"]["choose_k"]
-        for i in range(10000):
-            train_loader = DataLoader(
-                train_dataset, num_workers=self.config["data"]["num_workers"]
-            )
+        n_iter = (dataset_size - init_image) // self.config["active"]["choose_k"] + 1
+        topK = self.config["active"]["choose_k"]
+        for i in range(n_iter):
+            train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
             for i, batch in tqdm(enumerate(train_loader)):
                 # batch = {
                 # 'frame_id': [1],
@@ -996,26 +997,13 @@ class CoSLAM:
                         )
                         for i, batch in enumerate(holdout_loader):
                             # tqdm库在 pycharm 终端有显示错误
-                            print(
-                                "image:",
-                                i + 1,
-                                "/",
-                                len(holdout_loader.dataset),
-                                "\r",
-                                end="",
-                            )
+                            print("image:", i + 1, "/", len(holdout_loader.dataset), "\r", end="")
 
-                            rays_d_cam = (
-                                batch["direction"]
-                                .squeeze(0)[indice_h, indice_w, :]
-                                .to(self.device)
-                            )
+                            rays_d_cam = (batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device))
 
-                            target_s = (
-                                batch["rgb"]
-                                .squeeze(0)[indice_h, indice_w, :]
-                                .to(self.device)
-                            )
+                            target_s = (batch["rgb"].squeeze(0)[indice_h, indice_w, :]
+                                        .to(self.device)
+                                        )
 
                             target_d = (
                                 batch["depth"]
@@ -1070,7 +1058,7 @@ class CoSLAM:
                         diff = pres - posts
                         hold_out_index = (
                             # torch.topk(pres - posts, self.config["active"]["choose_k"])[1]
-                            torch.topk(pres - posts, 10)[1].cpu().numpy()
+                            torch.topk(pres - posts, topK)[1].cpu().numpy()
                         )
 
                         print(
@@ -1089,13 +1077,14 @@ class CoSLAM:
                         self.model.train()
                         # **************************
 
-                        # print("add keyframe Ids: ", end="")
-                        # for batch in top_info_gain_from_holdout:
-                        #     self.keyframeDatabase.add_keyframe(
-                        #         batch, filter_depth=self.config["mapping"]["filter_depth"]
-                        #     )
-                        #     # 输出 self.keyframeDatabase.frame_ids的最后一个元素
-                        #     print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
+                        print("add keyframe Ids: ", end="")
+                        for batch in top_info_gain_from_holdout:
+                            if batch["frame_id"] not in self.keyframeDatabase.frame_ids:
+                                self.keyframeDatabase.add_keyframe(
+                                    batch, filter_depth=self.config["mapping"]["filter_depth"]
+                                )
+                                # 输出 self.keyframeDatabase.frame_ids的最后一个元素
+                                print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
 
                     if i % self.config["mesh"]["vis"] == 0:
                         self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])

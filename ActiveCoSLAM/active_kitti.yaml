@@ -8,12 +8,11 @@ data:
   translation: 0
   num_workers: 4
   # inherit_from: configs/Tum/tum.yaml
-  datadir: dump/
-  sequence_length: 3
-  # datadir: /home/aneins/Codes/dataset/TUM/rgbd_dataset_freiburg1_desk
+  datadir: /home/aneins/Codes/dataset/KITTI/odometry/dataset
   trainskip: 1
-  output: output/TUM/fr_desk
-  exp_name: ac_demo
+  sequence: 07
+  output: output/KITTI/07
+  exp_name: kitti
 
 mapping:
   sample: 2048
