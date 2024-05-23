@@ -2,16 +2,17 @@ import os
 
 # os.environ['TCNN_CUDA_ARCHITECTURES'] = '86'
 import time
+import random
+import argparse
+import shutil
+import json
 
 # Package imports
 import torch
 import torch.optim as optim
 import numpy as np
-import random
 import torch.nn.functional as F
-import argparse
-import shutil
-import json
+
 import cv2
 
 from torch.utils.data import DataLoader
@@ -102,7 +103,7 @@ class CoSLAM:
         """
         Create the keyframe database
         """
-        # TODO 固定大小预分配的内存
+        # TODO 固定大小预分配的内存,可能和越界有关
         num_kf = int(
             # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧, +1 是第一帧 # self.dataset.num_frames = 592
             self.dataset.num_frames // self.config["mapping"]["keyframe_every"] + 1
@@ -167,7 +168,7 @@ class CoSLAM:
         return indice
 
     def get_loss_from_ret(
-            self, ret, rgb=True, sdf=True, depth=True, fs=True, smooth=False
+        self, ret, rgb=True, sdf=True, depth=True, fs=True, smooth=False
     ):
         """
         Get the training loss
@@ -227,7 +228,7 @@ class CoSLAM:
 
             self.map_optimizer.zero_grad()
             indice = self.select_samples(
-                # 从一个范围内的整数（0 到 H * W - 1）中随机选择samples=2048个样本像素
+                # 从一个范围内的整数（0 到 H * W - 1）中随机选择s2048个样本像素
                 # indice就是从 0 到 182528 之间随机选取 2048 个数作为 index
                 self.dataset.H,
                 self.dataset.W,
@@ -344,20 +345,20 @@ class CoSLAM:
 
         grid_size = (sample_points - 1) * voxel_size
         offset_max = (
-                self.bounding_box[:, 1] - self.bounding_box[:, 0] - grid_size - 2 * margin
+            self.bounding_box[:, 1] - self.bounding_box[:, 0] - grid_size - 2 * margin
         )
 
         offset = torch.rand(3).to(offset_max) * offset_max + margin
         coords = coordinates(sample_points - 1, "cpu", flatten=False).float().to(volume)
         pts = (
-                (coords + torch.rand((1, 1, 1, 3)).to(volume)) * voxel_size
-                + self.bounding_box[:, 0]
-                + offset
+            (coords + torch.rand((1, 1, 1, 3)).to(volume)) * voxel_size
+            + self.bounding_box[:, 0]
+            + offset
         )
 
         if self.config["grid"]["tcnn_encoding"]:
             pts_tcnn = (pts - self.bounding_box[:, 0]) / (
-                    self.bounding_box[:, 1] - self.bounding_box[:, 0]
+                self.bounding_box[:, 1] - self.bounding_box[:, 0]
             )
 
         # query_sdf 返回 sdf, h,beta
@@ -375,7 +376,7 @@ class CoSLAM:
         # tv_y = torch.pow(sdf[:, 1:, :-1] - sdf[:, :-1, :-1], 2).sum()
         # tv_z = torch.pow(sdf[:, :, 1:, :-1] - sdf[:, :, :-1, :-1], 2).sum()
 
-        loss = (tv_x + tv_y + tv_z) / (sample_points ** 3)
+        loss = (tv_x + tv_y + tv_z) / (sample_points**3)
 
         return loss
 
@@ -406,12 +407,13 @@ class CoSLAM:
         pose_optimizer = None
         # 获取所有关键帧的位姿
         # all the KF poses: 0, 5, 10, ... 每五个取一个
+        # TODO 可能和越界有关
         poses = torch.stack(
             [
                 self.est_c2w_data[i]
                 for i in range(
-                0, cur_frame_id, self.config["mapping"]["keyframe_every"]
-            )
+                    0, cur_frame_id, self.config["mapping"]["keyframe_every"]
+                )
             ]
         )
 
@@ -490,6 +492,7 @@ class CoSLAM:
             current_rays_batch = current_rays[idx_cur, :]
 
             rays = torch.cat([rays, current_rays_batch], dim=0)  # N, 7
+            # TODO 所有和config["mapping"]["keyframe_every"]有关的地方都要改
             ids_all = torch.cat(
                 [
                     ids // self.config["mapping"]["keyframe_every"],
@@ -506,11 +509,17 @@ class CoSLAM:
                 rays_d_cam[..., None, None, :] * poses_all[ids_all, None, :3, :3], -1
             )
             # Ensure all indices are within the valid range
-            assert ids_all.max() < poses_all.shape[0], "Index out of bounds ids_all.max()"
+            assert (
+                ids_all.max() < poses_all.shape[0]
+            ), "Index out of bounds ids_all.max()"
             assert ids_all.min() >= 0, "Index out of bounds ids_all.min()"
 
             # Now you can safely use ids_all as indices
-            rays_o = (poses_all[ids_all, None, :3, -1].repeat(1, rays_d.shape[1], 1).reshape(-1, 3))
+            rays_o = (
+                poses_all[ids_all, None, :3, -1]
+                .repeat(1, rays_d.shape[1], 1)
+                .reshape(-1, 3)
+            )
             rays_d = rays_d.reshape(-1, 3)
 
             ret = self.model.forward(rays_o, rays_d, target_s, target_d)
@@ -526,7 +535,10 @@ class CoSLAM:
                     print("Wait update")
                 self.map_optimizer.zero_grad()
 
-            if pose_optimizer is not None and (i + 1) % cfg["mapping"]["pose_accum_step"] == 0:
+            if (
+                pose_optimizer is not None
+                and (i + 1) % cfg["mapping"]["pose_accum_step"] == 0
+            ):
                 # 姿态优化器在每个 pose_accum_step(5步)之后更新一次姿态参数。
                 pose_optimizer.step()
                 # get SE3 poses to do forward pass
@@ -552,7 +564,7 @@ class CoSLAM:
             # 更新所有关键帧的姿态，这是在整个优化过程结束后对关键帧姿态进行最终调整
             for i in range(len(frame_ids_all[1:])):
                 self.est_c2w_data[int(frame_ids_all[i + 1].item())] = (
-                    self.matrix_from_tensor(cur_rot[i: i + 1], cur_trans[i: i + 1])
+                    self.matrix_from_tensor(cur_rot[i : i + 1], cur_trans[i : i + 1])
                     .detach()
                     .clone()[0]
                 )
@@ -654,7 +666,7 @@ class CoSLAM:
                 pts = rays_o + target_d * rays_d
 
                 pts_flat = (pts - self.bounding_box[:, 0]) / (
-                        self.bounding_box[:, 1] - self.bounding_box[:, 0]
+                    self.bounding_box[:, 1] - self.bounding_box[:, 0]
                 )
 
                 out = self.model.query_color_sdf_beta(pts_flat)
@@ -692,6 +704,7 @@ class CoSLAM:
             self.est_c2w_data[frame_id] = c2w_est.detach().clone()[0]
 
         if frame_id % self.config["mapping"]["keyframe_every"] != 0:
+            # TODO 检查和越界是否有关
             # Not a keyframe, need relative pose
             kf_id = frame_id // self.config["mapping"]["keyframe_every"]
             kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
@@ -807,6 +820,7 @@ class CoSLAM:
             self.est_c2w_data[frame_id] = c2w_est.detach().clone()[0]
 
         # Save relative pose of non-keyframes
+        # TODO 检查和越界是否有关
         if frame_id % self.config["mapping"]["keyframe_every"] != 0:
             kf_id = frame_id // self.config["mapping"]["keyframe_every"]
             kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
@@ -824,6 +838,7 @@ class CoSLAM:
     def convert_relative_pose(self):
         poses = {}
         for i in range(len(self.est_c2w_data)):
+            # TODO 检查和越界是否有关
             if i % self.config["mapping"]["keyframe_every"] == 0:
                 poses[i] = self.est_c2w_data[i]
             else:
@@ -912,7 +927,9 @@ class CoSLAM:
         n_iter = (dataset_size - init_image) // self.config["active"]["choose_k"] + 1
         topK = self.config["active"]["choose_k"]
         for i in range(n_iter):
-            train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
+            train_loader = DataLoader(
+                train_dataset, num_workers=self.config["data"]["num_workers"]
+            )
             for i, batch in tqdm(enumerate(train_loader)):
                 # batch = {
                 # 'frame_id': [1],
@@ -959,14 +976,16 @@ class CoSLAM:
                         self.global_BA(batch, i)
 
                     # Add keyframe
-                    # 前 20 个图片每五张图片加一个关键帧
+                    # 目前的逻辑是前 20 帧没五帧加一个关键帧
+                    # 从 20 帧开始,每过 x 帧(这里是 5 帧)使用信息增益选择关键帧
+                    # 前 20 个图片每五张图片加一个关键帧,这里应该没问题
                     if i % self.config["mapping"]["keyframe_every"] == 0 and i < 20:
                         self.keyframeDatabase.add_keyframe(
                             batch, filter_depth=self.config["mapping"]["filter_depth"]
                         )
                         print("add keyframe:", i)
                     # 从第 20个图片开始,每 5 张图片使用信息增益进行一次关键帧选择
-                    elif i % self.config["mapping"]["keyframe_every"] == 0:
+                    elif i % self.config["active"]["check_info_gain_every"] == 0:
                         downsampled_H, downsampled_W = (
                             self.dataset.H // 4,
                             self.dataset.W // 4,
@@ -997,13 +1016,26 @@ class CoSLAM:
                         )
                         for i, batch in enumerate(holdout_loader):
                             # tqdm库在 pycharm 终端有显示错误
-                            print("image:", i + 1, "/", len(holdout_loader.dataset), "\r", end="")
+                            print(
+                                "image:",
+                                i + 1,
+                                "/",
+                                len(holdout_loader.dataset),
+                                "\r",
+                                end="",
+                            )
 
-                            rays_d_cam = (batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device))
+                            rays_d_cam = (
+                                batch["direction"]
+                                .squeeze(0)[indice_h, indice_w, :]
+                                .to(self.device)
+                            )
 
-                            target_s = (batch["rgb"].squeeze(0)[indice_h, indice_w, :]
-                                        .to(self.device)
-                                        )
+                            target_s = (
+                                batch["rgb"]
+                                .squeeze(0)[indice_h, indice_w, :]
+                                .to(self.device)
+                            )
 
                             target_d = (
                                 batch["depth"]
@@ -1025,19 +1057,19 @@ class CoSLAM:
                                 )
 
                             uncert_render = (
-                                    rend_dict["uncert_map"].reshape(-1, samples_num, 1)
-                                    + 1e-9
+                                rend_dict["uncert_map"].reshape(-1, samples_num, 1)
+                                + 1e-9
                             )
                             # 1,160000,1 新数据集r2(holdout数据集)的不确定度 beta, \beta^2(r_2)
                             uncert_pts = (
-                                    rend_dict["raw"][..., -1].reshape(
-                                        -1,
-                                        samples_num,
-                                        self.config["training"]["n_samples_d"]
-                                        + self.config["training"]["n_importance"]
-                                        + self.config["training"]["n_range_d"],
-                                    )
-                                    + 1e-9
+                                rend_dict["raw"][..., -1].reshape(
+                                    -1,
+                                    samples_num,
+                                    self.config["training"]["n_samples_d"]
+                                    + self.config["training"]["n_importance"]
+                                    + self.config["training"]["n_range_d"],
+                                )
+                                + 1e-9
                             )
                             weight_pts = rend_dict["weights"].reshape(
                                 -1,
@@ -1049,7 +1081,13 @@ class CoSLAM:
 
                             pre = uncert_pts.sum([1, 2])  # 1,160000,192->1
 
-                            post = (1.0 / (1.0 / uncert_pts + weight_pts * weight_pts / uncert_render)).sum([1, 2])
+                            post = (
+                                1.0
+                                / (
+                                    1.0 / uncert_pts
+                                    + weight_pts * weight_pts / uncert_render
+                                )
+                            ).sum([1, 2])
                             pres.append(pre)
                             posts.append(post)
 
@@ -1081,10 +1119,13 @@ class CoSLAM:
                         for batch in top_info_gain_from_holdout:
                             if batch["frame_id"] not in self.keyframeDatabase.frame_ids:
                                 self.keyframeDatabase.add_keyframe(
-                                    batch, filter_depth=self.config["mapping"]["filter_depth"]
+                                    batch,
+                                    filter_depth=self.config["mapping"]["filter_depth"],
                                 )
                                 # 输出 self.keyframeDatabase.frame_ids的最后一个元素
-                                print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
+                                print(
+                                    self.keyframeDatabase.frame_ids[-1].item(), end=" "
+                                )
 
                     if i % self.config["mesh"]["vis"] == 0:
                         self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
@@ -1128,8 +1169,15 @@ class CoSLAM:
 
         pose_relative = self.convert_relative_pose()
         pose_evaluation(self.pose_gt, self.est_c2w_data, 1, os.path.join(save_path), i)
-        pose_evaluation(self.pose_gt, pose_relative, 1, os.path.join(save_path), i, img="pose_r",
-                        name="output_relative.txt")
+        pose_evaluation(
+            self.pose_gt,
+            pose_relative,
+            1,
+            os.path.join(save_path),
+            i,
+            img="pose_r",
+            name="output_relative.txt",
+        )
 
         # TODO: Evaluation of reconstruction
 
