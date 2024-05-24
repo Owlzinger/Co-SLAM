@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="ac_coslam_kitti" type="PythonConfigurationType" factoryName="Python">
+  <configuration default="false" name="kitti" type="PythonConfigurationType" factoryName="Python">
     <module name="Co-SLAM" />
     <option name="ENV_FILES" value="" />
     <option name="INTERPRETER_OPTIONS" value="" />
@@ -9,9 +9,8 @@
       <env name="DISPLAY" value="localhost:11.0" />
     </envs>
     <option name="SDK_HOME" value="" />
-    <option name="SDK_NAME" value="coslam" />
     <option name="WORKING_DIRECTORY" value="" />
-    <option name="IS_MODULE_SDK" value="false" />
+    <option name="IS_MODULE_SDK" value="true" />
     <option name="ADD_CONTENT_ROOTS" value="true" />
     <option name="ADD_SOURCE_ROOTS" value="true" />
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
