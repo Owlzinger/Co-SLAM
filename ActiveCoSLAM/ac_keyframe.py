@@ -29,7 +29,6 @@ class KeyFrameDatabase(object):
         self.frame_ids = None
         self.H = H
         self.W = W
-        self.key_frame_list: list = []
 
     def __len__(self):
         return len(self.frame_ids)
@@ -80,8 +79,9 @@ class KeyFrameDatabase(object):
 
         rays = torch.cat(
             [batch["direction"], batch["rgb"], batch["depth"][..., None]], dim=-1
-        )  # 4*368*496*(3+1+3)  给 depth 的最后加一维, 并把最后一维合并
-        rays = rays.reshape(1, -1, rays.shape[-1])  # 1*(368*496)*7 只保留第一维和最后一维,中间的乘起来
+        )  # 4*368*496*(3+1+3)  给 depth 的最后加一维, 并最后一维合并
+        rays = rays.reshape(1, -1, rays.shape[-1])
+        # 1*(368*496)*7 只保留第一维和最后一维,中间的乘起来
         #  Pixel sampling 5%的像素
         if filter_depth:
             rays = self.sample_single_keyframe_rays(rays, "filter_depth")
@@ -169,6 +169,8 @@ class KeyFrameDatabase(object):
         )  # [N_rays, N_samples, 3]
         pts_flat = pts.reshape(-1, 3).cpu().numpy()
 
+        key_frame_list = []
+
         for i, frame_id in enumerate(self.frame_ids):
             frame_id = int(frame_id.item())
             c2w = est_c2w_list[frame_id].cpu().numpy()
@@ -201,15 +203,15 @@ class KeyFrameDatabase(object):
             mask = mask & (z[:, :, 0] < 0)
             mask = mask.reshape(-1)
             percent_inside = mask.sum() / uv.shape[0]
-            self.key_frame_list.append(
+            key_frame_list.append(
                 {"id": frame_id, "percent_inside": percent_inside, "sample_id": i}
             )
 
-        self.key_frame_list = sorted(
-            self.key_frame_list, key=lambda i: i["percent_inside"], reverse=True
+        key_frame_list = sorted(
+            key_frame_list, key=lambda i: i["percent_inside"], reverse=True
         )
         selected_keyframe_list = [
-            dic["sample_id"] for dic in self.key_frame_list if dic["percent_inside"] > 0.00
+            dic["sample_id"] for dic in key_frame_list if dic["percent_inside"] > 0.00
         ]
         selected_keyframe_list = list(
             np.random.permutation(np.array(selected_keyframe_list))[:k_frame]

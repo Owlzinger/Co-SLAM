@@ -494,21 +494,15 @@ class JointEncoding(nn.Module):
 
         if "rgb0" in rend_dict:
             # rgb_loss 计算粗网络和细网络的和
-            rgb_loss += compute_loss(
-                rend_dict["rgb0"] * rgb_weight, target_rgb * rgb_weight
-            )  # 粗网络的 rbg_loss加到精网络上
-            depth_loss += compute_loss(
-                rend_dict["depth0"][valid_depth_mask],
-                target_d.squeeze()[valid_depth_mask],
-            )
+            rgb_loss += compute_loss(rend_dict["rgb0"] * rgb_weight, target_rgb * rgb_weight)  # 粗网络的 rbg_loss加到精网络上
+            depth_loss += compute_loss(rend_dict["depth0"][valid_depth_mask],
+                                       target_d.squeeze()[valid_depth_mask])
 
         ## 2. Get sdf loss/free space loss 公式七
         z_vals = rend_dict["z_vals"]  # [N_rand, N_samples + N_importance]
         sdf = rend_dict["raw"][..., -1]  # [N_rand, N_samples + N_importance]
         truncation = self.config["training"]["trunc"] * self.config["data"]["sc_factor"]
-        fs_loss, sdf_loss = get_sdf_loss(
-            z_vals, target_d, sdf, truncation, "l2", grad=None
-        )
+        fs_loss, sdf_loss = get_sdf_loss(z_vals, target_d, sdf, truncation, "l2", grad=None)
 
         ## TODO 更改 loss
         ret = {
