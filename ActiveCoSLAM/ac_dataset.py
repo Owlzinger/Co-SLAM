@@ -74,7 +74,7 @@ class BaseDataset(Dataset):
         self.ignore_h = cfg["tracking"]["ignore_edge_H"]
 
         self.total_pixels = (self.H - self.crop_size * 2) * (
-            self.W - self.crop_size * 2
+                self.W - self.crop_size * 2
         )
         self.num_rays_to_save = int(
             self.total_pixels * cfg["mapping"]["n_pixels"]
@@ -90,16 +90,16 @@ class BaseDataset(Dataset):
 
 class TUMDataset(BaseDataset):
     def __init__(
-        self,
-        cfg,
-        basedir,
-        align=True,
-        trainskip=1,
-        downsample_factor=1,
-        translation=0.0,
-        sc_factor=1.0,
-        crop=0,
-        load=True,
+            self,
+            cfg,
+            basedir,
+            align=True,
+            trainskip=1,
+            downsample_factor=1,
+            translation=0.0,
+            sc_factor=1.0,
+            crop=0,
+            load=True,
     ):
         super(TUMDataset, self).__init__(cfg)
 
@@ -161,7 +161,7 @@ class TUMDataset(BaseDataset):
                 k = np.argmin(np.abs(tstamp_pose - t))
 
                 if (np.abs(tstamp_depth[j] - t) < max_dt) and (
-                    np.abs(tstamp_pose[k] - t) < max_dt
+                        np.abs(tstamp_pose[k] - t) < max_dt
                 ):
                     associations.append((i, j, k))
 
@@ -248,7 +248,7 @@ class TUMDataset(BaseDataset):
         color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
         color_data = color_data / 255.0
         depth_data = (
-            depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
+                depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
         )
 
         H, W = depth_data.shape
@@ -337,7 +337,7 @@ class TUMDataset(BaseDataset):
 
         return new_dataset
 
-    def slice_except(self, indices):
+    def remove(self, indices):
         """
         Returns a new TUMDataset instance containing all the elements except those specified by the indices list.
         返回除了 indices 以外的
@@ -349,14 +349,14 @@ class TUMDataset(BaseDataset):
 
 class KITTIDataset(BaseDataset):
     def __init__(
-        self,
-        cfg,
-        basedir,
-        trainskip=1,
-        downsample_factor=1,
-        translation=0.0,
-        sc_factor=1.0,
-        crop=0,
+            self,
+            cfg,
+            basedir,
+            trainskip=1,
+            downsample_factor=1,
+            translation=0.0,
+            sc_factor=1.0,
+            crop=0,
     ):
         super(KITTIDataset, self).__init__(cfg)
 
@@ -407,7 +407,7 @@ class KITTIDataset(BaseDataset):
         color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
         color_data = color_data / 255.0
         depth_data = (
-            depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
+                depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
         )
 
         H, W = depth_data.shape
@@ -467,14 +467,14 @@ class KITTIDataset(BaseDataset):
 
 class iPhoneDataset(BaseDataset):
     def __init__(
-        self,
-        cfg,
-        basedir,
-        trainskip=1,
-        downsample_factor=1,
-        translation=0.0,
-        sc_factor=1.0,
-        crop=0,
+            self,
+            cfg,
+            basedir,
+            trainskip=1,
+            downsample_factor=1,
+            translation=0.0,
+            sc_factor=1.0,
+            crop=0,
     ):
         super(iPhoneDataset, self).__init__(cfg)
 
@@ -530,7 +530,7 @@ class iPhoneDataset(BaseDataset):
         color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
         color_data = color_data / 255.0
         depth_data = (
-            depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
+                depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
         )
 
         H, W = depth_data.shape
@@ -606,14 +606,14 @@ class iPhoneDataset(BaseDataset):
 
 class ReplicaDataset(BaseDataset):
     def __init__(
-        self,
-        cfg,
-        basedir,
-        trainskip=1,
-        downsample_factor=1,
-        translation=0.0,
-        sc_factor=1.0,
-        crop=0,
+            self,
+            cfg,
+            basedir,
+            trainskip=1,
+            downsample_factor=1,
+            translation=0.0,
+            sc_factor=1.0,
+            crop=0,
     ):
         super(ReplicaDataset, self).__init__(cfg)
 
@@ -650,7 +650,7 @@ class ReplicaDataset(BaseDataset):
         color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
         color_data = color_data / 255.0
         depth_data = (
-            depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
+                depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
         )
 
         H, W = depth_data.shape
@@ -696,14 +696,14 @@ class ReplicaDataset(BaseDataset):
 
 class ScannetDataset(BaseDataset):
     def __init__(
-        self,
-        cfg,
-        basedir,
-        trainskip=1,
-        downsample_factor=1,
-        translation=0.0,
-        sc_factor=1.0,
-        crop=0,
+            self,
+            cfg,
+            basedir,
+            trainskip=1,
+            downsample_factor=1,
+            translation=0.0,
+            sc_factor=1.0,
+            crop=0,
     ):
         super(ScannetDataset, self).__init__(cfg)
 
@@ -754,7 +754,7 @@ class ScannetDataset(BaseDataset):
         color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
         color_data = color_data / 255.0
         depth_data = (
-            depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
+                depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
         )
 
         H, W = depth_data.shape
@@ -814,14 +814,14 @@ class ScannetDataset(BaseDataset):
 
 class AzureDataset(BaseDataset):
     def __init__(
-        self,
-        cfg,
-        basedir,
-        trainskip=1,
-        downsample_factor=1,
-        translation=0.0,
-        sc_factor=1.0,
-        crop=0,
+            self,
+            cfg,
+            basedir,
+            trainskip=1,
+            downsample_factor=1,
+            translation=0.0,
+            sc_factor=1.0,
+            crop=0,
     ):
         super(AzureDataset, self).__init__(cfg)
 
@@ -866,7 +866,7 @@ class AzureDataset(BaseDataset):
         color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
         color_data = color_data / 255.0
         depth_data = (
-            depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
+                depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
         )
 
         H, W = depth_data.shape
@@ -931,7 +931,7 @@ class AzureDataset(BaseDataset):
                     c2w = np.array(
                         list(
                             map(
-                                float, ("".join(content[i + 1 : i + 5])).strip().split()
+                                float, ("".join(content[i + 1: i + 5])).strip().split()
                             )
                         )
                     ).reshape((4, 4))
@@ -949,14 +949,14 @@ class AzureDataset(BaseDataset):
 
 class RGBDataset(BaseDataset):
     def __init__(
-        self,
-        cfg,
-        basedir,
-        trainskip=1,
-        downsample_factor=1,
-        translation=0.0,
-        sc_factor=1.0,
-        crop=0,
+            self,
+            cfg,
+            basedir,
+            trainskip=1,
+            downsample_factor=1,
+            translation=0.0,
+            sc_factor=1.0,
+            crop=0,
     ):
         super(RGBDataset, self).__init__(cfg)
 
@@ -1039,7 +1039,7 @@ class RGBDataset(BaseDataset):
         color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
         color_data = color_data / 255.0
         depth_data = (
-            depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
+                depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
         )
 
         H, W = depth_data.shape
@@ -1084,7 +1084,7 @@ class RGBDataset(BaseDataset):
                 valid.append(True)
                 pose_floats = [
                     [float(x) for x in line.split()]
-                    for line in lines[i : i + lines_per_matrix]
+                    for line in lines[i: i + lines_per_matrix]
                 ]
                 poses.append(pose_floats)
 
@@ -1093,16 +1093,16 @@ class RGBDataset(BaseDataset):
 
 class RealsenseDataset(BaseDataset):
     def __init__(
-        self,
-        cfg,
-        basedir,
-        align=True,
-        trainskip=1,
-        downsample_factor=1,
-        translation=0.0,
-        sc_factor=1.0,
-        crop=0,
-        load=True,
+            self,
+            cfg,
+            basedir,
+            align=True,
+            trainskip=1,
+            downsample_factor=1,
+            translation=0.0,
+            sc_factor=1.0,
+            crop=0,
+            load=True,
     ):
         super(RealsenseDataset, self).__init__(cfg)
 
@@ -1147,7 +1147,7 @@ class RealsenseDataset(BaseDataset):
         color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)
         color_data = color_data / 255.0
         depth_data = (
-            depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
+                depth_data.astype(np.float32) / self.png_depth_scale * self.sc_factor
         )
 
         H, W = depth_data.shape
@@ -1204,7 +1204,7 @@ class RealsenseDataset(BaseDataset):
                     c2w = np.array(
                         list(
                             map(
-                                float, ("".join(content[i + 1 : i + 5])).strip().split()
+                                float, ("".join(content[i + 1: i + 5])).strip().split()
                             )
                         )
                     ).reshape((4, 4))

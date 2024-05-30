@@ -1085,18 +1085,18 @@ class CoSLAM:
                         train_dataset = train_dataset + top_info_gain_from_holdout
 
                         # 将信息增益最大的帧从 holdout_dataset 中删除
-                        holdout_dataset = holdout_dataset.slice_except(hold_out_index)
+                        holdout_dataset = holdout_dataset.remove(hold_out_index)
 
                         self.model.train()
                         # **************************
 
-                        # print("add keyframe Ids: ", end="")
-                        # for batch in top_info_gain_from_holdout:
-                        #     self.keyframeDatabase.add_keyframe(
-                        #         batch, filter_depth=self.config["mapping"]["filter_depth"]
-                        #     )
-                        #     # 输出 self.keyframeDatabase.frame_ids的最后一个元素
-                        #     print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
+                        print("add keyframe Ids: ", end="")
+                        for batch in top_info_gain_from_holdout:
+                            self.keyframeDatabase.add_keyframe(
+                                batch, filter_depth=self.config["mapping"]["filter_depth"]
+                            )
+                            # 输出 self.keyframeDatabase.frame_ids的最后一个元素
+                            print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
 
                     if i % self.config["mesh"]["vis"] == 0:
                         self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])

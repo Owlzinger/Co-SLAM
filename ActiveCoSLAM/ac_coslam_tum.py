@@ -949,8 +949,7 @@ class CoSLAM:
                 # Tracking + Mapping
                 else:
                     # ***************** Tracking*****************
-                    if self.config["tracking"]["iter_point"] > 0:  # 代码中是 False
-                        # 通过点云来跟踪当前帧的相机位姿
+                    if self.config["tracking"]["iter_point"] > 0:  # # 通过点云来跟踪当前帧的相机位姿, 代码中是 False
                         self.tracking_pc(batch, i)
                     # 使用当前的 rgb 损失,深度损失,sdf 损失来跟踪当前帧的相机位姿
                     self.tracking_render(batch, i)
@@ -965,29 +964,22 @@ class CoSLAM:
                     # 前 30 个图片每五张图片加一个关键帧,这里应该没问题
                     if i % self.config["mapping"]["keyframe_every"] == 0:
                         if i <= 20:
-                            self.keyframeDatabase.add_keyframe(
-                                batch, filter_depth=self.config["mapping"]["filter_depth"]
-                            )
+                            self.keyframeDatabase.add_keyframe(batch,
+                                                               filter_depth=self.config["mapping"]["filter_depth"])
                             print("add keyframe:", i)
                         # 从第 30个图片开始,每 5 张图片使用信息增益进行一次关键帧选择
                         else:
-                            downsampled_H, downsampled_W = (
-                                self.dataset.H // 2, self.dataset.W // 2,
-                            )  # 只取 1/4 的点,
+                            downsampled_H, downsampled_W = (self.dataset.H // 2, self.dataset.W // 2)  # 只取 1/4 的点,
                             # 原论文是 1/2的点, 但会出现 OOM
                             samples_num = downsampled_H * downsampled_W  # 采样点数量
                             # *********添加关键帧***************************
                             # print('before evaluation:', i_train, i_holdout.min(), i_holdout.max())
                             # *******************************************
                             print("\nstart evaluation:")
-                            indice = self.select_samples(
-                                # 图像 H*W 368*496, samples=45632
-                                # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
-                                self.dataset.H, self.dataset.W, samples_num)
-                            indice_h, indice_w = (
-                                indice % self.dataset.H,
-                                indice // self.dataset.H,
-                            )
+                            # 图像 H*W 368*496, samples=45632
+                            # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
+                            indice = self.select_samples(self.dataset.H, self.dataset.W, samples_num)
+                            indice_h, indice_w = (indice % self.dataset.H, indice // self.dataset.H)
                             pres = []
                             posts = []
                             self.model.eval()
@@ -1000,59 +992,35 @@ class CoSLAM:
                                 # tqdm库在 pycharm 终端有显示错误
                                 print("image:", i + 1, "/", len(holdout_dataset), "\r", end="")
 
-                                rays_d_cam = (
-                                    batch["direction"]
-                                    .squeeze(0)[indice_h, indice_w, :]
-                                    .to(self.device)
-                                )
+                                rays_d_cam = batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device)
 
-                                target_s = (
-                                    batch["rgb"]
-                                    .squeeze(0)[indice_h, indice_w, :]
-                                    .to(self.device)
-                                )
+                                target_s = batch["rgb"].squeeze(0)[indice_h, indice_w, :].to(self.device)
 
-                                target_d = (
-                                    batch["depth"]
-                                    .squeeze(0)[indice_h, indice_w]
-                                    .to(self.device)
-                                    .unsqueeze(-1)
-                                )
+                                target_d = batch["depth"].squeeze(0)[indice_h, indice_w].to(self.device).unsqueeze(-1)
 
                                 c2w = batch["c2w"][0].to(self.device)
 
                                 rays_o = c2w[None, :3, -1].repeat(samples_num, 1)
-                                rays_d = torch.sum(
-                                    rays_d_cam[..., None, :] * c2w[:3, :3], -1
-                                )
+                                rays_d = torch.sum(rays_d_cam[..., None, :] * c2w[:3, :3], -1)
 
                                 with torch.no_grad():
-                                    rend_dict = self.model.forward(
-                                        rays_o, rays_d, target_s, target_d
-                                    )
+                                    rend_dict = self.model.forward(rays_o, rays_d, target_s, target_d)
 
-                                uncert_render = (
-                                        rend_dict["uncert_map"].reshape(-1, samples_num, 1)
-                                        + 1e-9
-                                )
+                                uncert_render = rend_dict["uncert_map"].reshape(-1, samples_num, 1) + 1e-9
+
                                 # 1,160000,1 新数据集r2(holdout数据集)的不确定度 beta, \beta^2(r_2)
                                 uncert_pts = (
-                                        rend_dict["raw"][..., -1].reshape(
-                                            -1,
-                                            samples_num,
-                                            self.config["training"]["n_samples_d"]
-                                            + self.config["training"]["n_importance"]
-                                            + self.config["training"]["n_range_d"],
-                                        )
-                                        + 1e-9
+                                        rend_dict["raw"][..., -1].reshape(-1, samples_num,
+                                                                          self.config["training"]["n_samples_d"]
+                                                                          + self.config["training"]["n_importance"]
+                                                                          + self.config["training"]["n_range_d"],
+                                                                          ) + 1e-9
                                 )
-                                weight_pts = rend_dict["weights"].reshape(
-                                    -1,
-                                    samples_num,
-                                    self.config["training"]["n_samples_d"]  # 64
-                                    + self.config["training"]["n_importance"]  # 0
-                                    + self.config["training"]["n_range_d"],  # 21
-                                )  # 1,160000,192
+                                weight_pts = rend_dict["weights"].reshape(-1, samples_num,
+                                                                          self.config["training"]["n_samples_d"]  # 64
+                                                                          + self.config["training"]["n_importance"]  # 0
+                                                                          + self.config["training"]["n_range_d"],  # 21
+                                                                          )  # 1,160000,192
 
                                 pre = uncert_pts.sum([1, 2])  # 1,160000,192->1
 
@@ -1062,8 +1030,8 @@ class CoSLAM:
 
                             pres = torch.cat(pres, 0)  # 40,
                             posts = torch.cat(posts, 0)  # 40
-                            diff = pres - posts
-                            hold_out_index = (torch.topk(pres - posts, 1)[1].cpu().numpy())
+                            topK = 5
+                            hold_out_index = (torch.topk(pres - posts, topK)[1].cpu().numpy())
 
                             print(
                                 "the top info gain Frame-ids: ",
@@ -1074,7 +1042,7 @@ class CoSLAM:
                             train_dataset = train_dataset + top_info_gain_from_holdout
 
                             # 将信息增益最大的帧从 holdout_dataset 中删除
-                            holdout_dataset = holdout_dataset.slice_except(hold_out_index)
+                            holdout_dataset_all = holdout_dataset_all.remove(hold_out_index)
 
                             self.model.train()
                             # **************************
@@ -1083,13 +1051,10 @@ class CoSLAM:
                             for batch in top_info_gain_from_holdout:
                                 if batch["frame_id"] not in self.keyframeDatabase.frame_ids:
                                     self.keyframeDatabase.add_keyframe(
-                                        batch,
-                                        filter_depth=self.config["mapping"]["filter_depth"],
+                                        batch, filter_depth=self.config["mapping"]["filter_depth"]
                                     )
                                     # 输出 self.keyframeDatabase.frame_ids的最后一个元素
-                                    print(
-                                        self.keyframeDatabase.frame_ids[-1].item(), end=" "
-                                    )
+                                    print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
 
                     if i % self.config["mesh"]["vis"] == 0:
                         self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
