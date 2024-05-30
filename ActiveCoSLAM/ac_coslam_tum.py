@@ -6,6 +6,7 @@ import random
 import argparse
 import shutil
 import json
+from datetime import datetime
 
 # Package imports
 import torch
@@ -16,6 +17,8 @@ import torch.nn.functional as F
 import cv2
 
 from torch.utils.data import DataLoader
+
+# from tqdm import tqdm
 from tqdm import tqdm
 from tqdm.rich import trange
 
@@ -408,18 +411,14 @@ class CoSLAM:
         # 获取所有关键帧的位姿
         # all the KF poses: 0, 5, 10, ... 每五个取一个
         # TODO 可能和越界有关
-        poses = torch.stack(
-            [
-                self.est_c2w_data[i]
-                for i in range(
-                    0, cur_frame_id, self.config["mapping"]["keyframe_every"]
-                )
-            ]
-        )
+        index_list = self.keyframeDatabase.frame_ids.tolist()
 
-        # 获取所有关键帧的位姿和 id
+        # all the KF poses: 0, 5, 10, ...
+        # 取出所有关键帧的 估计pose
+        poses = torch.stack([self.est_c2w_data[i] for i in index_list])
+
         # frame ids for all KFs, used for update poses after optimization
-        # TODO 可能和越界有关
+        frame_ids_all = self.keyframeDatabase.frame_ids
         # 如果 self.keyframeDatabase.keyframe_list为空,则添加一个 0,否则返回 self.keyframeDatabase.keyframe_list
         if len(self.keyframeDatabase.key_frame_list) < 1:
             self.keyframeDatabase.key_frame_list.append(0)
@@ -429,6 +428,8 @@ class CoSLAM:
 
         if len(self.keyframeDatabase.frame_ids) < 2:
             # 如果关键帧库的数量小于 2, 直接使用这些位姿,不做挑选
+            # TODO posed都不对
+
             poses_fixed = torch.nn.parameter.Parameter(poses).to(self.device)
             current_pose = self.est_c2w_data[cur_frame_id][None, ...]
             poses_all = torch.cat([poses_fixed, current_pose], dim=0)
@@ -450,11 +451,7 @@ class CoSLAM:
 
             else:
                 # 如果不优化当前帧, 就只加入 poses_all中就行了
-                (
-                    cur_rot,
-                    cur_trans,
-                    pose_optimizer,
-                ) = self.get_pose_param_optim(poses[1:])
+                cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(poses[1:])
                 pose_optim = self.matrix_from_tensor(cur_rot, cur_trans).to(self.device)
                 poses_all = torch.cat([poses_fixed, pose_optim, current_pose], dim=0)
 
@@ -922,11 +919,11 @@ class CoSLAM:
         init_image = 30
         train_dataset = self.dataset.slice(range(0, init_image))
 
-        holdout_dataset = self.dataset.slice(range(init_image, dataset_size))
+        holdout_dataset_all = self.dataset.slice(range(init_image, dataset_size))
         # 循环次数= (总数-初始数)/每次添加的数
         n_iter = (dataset_size - init_image) // self.config["active"]["choose_k"] + 1
         topK = self.config["active"]["choose_k"]
-        for i in range(n_iter):
+        for i in range(1000):
             train_loader = DataLoader(
                 train_dataset, num_workers=self.config["data"]["num_workers"]
             )
@@ -971,59 +968,50 @@ class CoSLAM:
                     # 使用当前的 rgb 损失,深度损失,sdf 损失来跟踪当前帧的相机位姿
                     self.tracking_render(batch, i)
                     # ***************** Mapping & Global BA*****************
-                    if i % self.config["mapping"]["map_every"] == 0:
+                    if i % self.config["mapping"]["map_every"] == 0:  # 代码中是 5
                         self.current_frame_mapping(batch, i)
                         self.global_BA(batch, i)
 
                     # Add keyframe
-                    # 目前的逻辑是前 20 帧没五帧加一个关键帧
-                    # 从 20 帧开始,每过 x 帧(这里是 5 帧)使用信息增益选择关键帧
-                    # 前 20 个图片每五张图片加一个关键帧,这里应该没问题
-                    if i % self.config["mapping"]["keyframe_every"] == 0 and i < 20:
-                        self.keyframeDatabase.add_keyframe(
-                            batch, filter_depth=self.config["mapping"]["filter_depth"]
-                        )
-                        print("add keyframe:", i)
-                    # 从第 20个图片开始,每 5 张图片使用信息增益进行一次关键帧选择
-                    elif i % self.config["active"]["check_info_gain_every"] == 0:
-                        downsampled_H, downsampled_W = (
-                            self.dataset.H // 4,
-                            self.dataset.W // 4,
-                        )  # 只取 1/4 的点,
-                        # 原论文是 1/2的点, 但会出现 OOM
-                        samples_num = downsampled_H * downsampled_W  # 采样点数量
-                        # *********添加关键帧***************************
-                        # print('before evaluation:', i_train, i_holdout.min(), i_holdout.max())
-                        # *******************************************
-                        print("\nstart evaluation:")
-                        indice = self.select_samples(
-                            # 图像 H*W 368*496, samples=45632
-                            # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
-                            self.dataset.H,
-                            self.dataset.W,
-                            samples_num,
-                        )
-                        indice_h, indice_w = (
-                            indice % self.dataset.H,
-                            indice // self.dataset.H,
-                        )
-                        pres = []
-                        posts = []
-                        self.model.eval()
-                        holdout_loader = DataLoader(
-                            holdout_dataset,
-                            num_workers=self.config["data"]["num_workers"],
-                        )
-                        for i, batch in enumerate(holdout_loader):
-                            # tqdm库在 pycharm 终端有显示错误
-                            print(
-                                "image:",
-                                i + 1,
-                                "/",
-                                len(holdout_loader.dataset),
-                                "\r",
-                                end="",
+                    # 目前的逻辑是前 30 帧没五帧加一个关键帧
+                    # 从 30 帧开始,每过 x 帧(这里是 5 帧)使用信息增益选择关键帧
+                    # 前 30 个图片每五张图片加一个关键帧,这里应该没问题
+                    if i % self.config["mapping"]["keyframe_every"] == 0:
+                        if i <= 20:
+                            self.keyframeDatabase.add_keyframe(
+                                batch, filter_depth=self.config["mapping"]["filter_depth"]
                             )
+                            print("add keyframe:", i)
+                        # 从第 30个图片开始,每 5 张图片使用信息增益进行一次关键帧选择
+                        else:
+                            downsampled_H, downsampled_W = (
+                                self.dataset.H // 2, self.dataset.W // 2,
+                            )  # 只取 1/4 的点,
+                            # 原论文是 1/2的点, 但会出现 OOM
+                            samples_num = downsampled_H * downsampled_W  # 采样点数量
+                            # *********添加关键帧***************************
+                            # print('before evaluation:', i_train, i_holdout.min(), i_holdout.max())
+                            # *******************************************
+                            print("\nstart evaluation:")
+                            indice = self.select_samples(
+                                # 图像 H*W 368*496, samples=45632
+                                # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
+                                self.dataset.H, self.dataset.W, samples_num)
+                            indice_h, indice_w = (
+                                indice % self.dataset.H,
+                                indice // self.dataset.H,
+                            )
+                            pres = []
+                            posts = []
+                            self.model.eval()
+                            # 从第 i 帧开始后面的十个图像作为 holdout 数据集,计算信息增益
+                            # 第一次根据信息增益选择的时候, i=20, 关键帧库中的关键帧是 0,5,10,15.
+                            # 我想选择 16-25帧作为保留集, i-4=16, i-4+11=26
+                            holdout_dataset = self.dataset.slice(range(i - 4, i - 4 + 10))
+                            holdout_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
+                            for i, batch in enumerate(holdout_loader):
+                                # tqdm库在 pycharm 终端有显示错误
+                                print("image:", i + 1, "/", len(holdout_dataset), "\r", end="")
 
                             rays_d_cam = (
                                 batch["direction"]
@@ -1091,13 +1079,10 @@ class CoSLAM:
                             pres.append(pre)
                             posts.append(post)
 
-                        pres = torch.cat(pres, 0)  # 40,
-                        posts = torch.cat(posts, 0)  # 40
-                        diff = pres - posts
-                        hold_out_index = (
-                            # torch.topk(pres - posts, self.config["active"]["choose_k"])[1]
-                            torch.topk(pres - posts, topK)[1].cpu().numpy()
-                        )
+                            pres = torch.cat(pres, 0)  # 40,
+                            posts = torch.cat(posts, 0)  # 40
+                            diff = pres - posts
+                            hold_out_index = (torch.topk(pres - posts, 1)[1].cpu().numpy())
 
                         print(
                             "the top info gain Frame-ids: ",

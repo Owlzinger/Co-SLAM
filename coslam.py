@@ -291,13 +291,16 @@ class CoSLAM():
             cur_frame_id: current frame id
         '''
         pose_optimizer = None
+        index_list = self.keyframeDatabase.frame_ids.tolist()
 
         # all the KF poses: 0, 5, 10, ...
         poses = torch.stack(
-            [self.est_c2w_data[i] for i in range(0, cur_frame_id, self.config['mapping']['keyframe_every'])])
+            # [self.est_c2w_data[i] for i in range(0, cur_frame_id, self.config['mapping']['keyframe_every'])])
+            [self.est_c2w_data[i] for i in index_list])
 
         # frame ids for all KFs, used for update poses after optimization
-        frame_ids_all = torch.tensor(list(range(0, cur_frame_id, self.config['mapping']['keyframe_every'])))
+        # frame_ids_all = torch.tensor(list(range(0, cur_frame_id, self.config['mapping']['keyframe_every'])))
+        frame_ids_all = self.keyframeDatabase.frame_ids
 
         if len(self.keyframeDatabase.frame_ids) < 2:
             poses_fixed = torch.nn.parameter.Parameter(poses).to(self.device)
@@ -745,5 +748,5 @@ if __name__ == '__main__':
         f.write(json.dumps(cfg, indent=4))
 
     slam = CoSLAM(cfg)
-
+    slam.seed_everything(0)
     slam.run()
