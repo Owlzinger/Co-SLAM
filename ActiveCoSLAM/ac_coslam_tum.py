@@ -1204,6 +1204,7 @@ if __name__ == "__main__":
     start_time = time.time()  # 开始时间
 
     slam = CoSLAM(cfg)
+    slam.seed_everything(0)
 
     slam.run()
     # print(slam.keyframeDatabase.frame_ids)
