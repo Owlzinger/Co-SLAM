@@ -504,7 +504,6 @@ class JointEncoding(nn.Module):
         truncation = self.config["training"]["trunc"] * self.config["data"]["sc_factor"]
         fs_loss, sdf_loss = get_sdf_loss(z_vals, target_d, sdf, truncation, "l2", grad=None)
 
-        ## TODO 更改 loss
         ret = {
             "rgb": rend_dict["rgb"],
             "depth": rend_dict["depth"],

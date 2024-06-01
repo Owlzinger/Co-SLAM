@@ -397,6 +397,51 @@ class CoSLAM():
                 self.est_c2w_data[cur_frame_id] = \
                     self.matrix_from_tensor(cur_rot[-1:], cur_trans[-1:]).detach().clone()[0]
 
+    def test(self, batch, frame_id):
+        c2w_gt = batch["c2w"][0].to(self.device)
+
+        # Initialize current pose
+        if self.config["tracking"]["iter_point"] > 0:  # iter_point=0
+            cur_c2w = self.est_c2w_data[frame_id]
+        else:
+            cur_c2w = self.predict_current_pose(
+                frame_id, self.config["tracking"]["const_speed"],  # Ture
+            )
+
+        indice = None
+
+        iW = self.config["tracking"]["ignore_edge_W"]
+        iH = self.config["tracking"]["ignore_edge_H"]
+
+        cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(cur_c2w[None, ...], mapping=False)
+
+        # Start tracking
+        pose_optimizer.zero_grad()
+        for param in self.model.parameters():
+            param.requires_grad = False
+        c2w_est = self.matrix_from_tensor(cur_rot, cur_trans)
+
+        # Note here we fix the sampled points for optimisation
+        if indice is None:
+            indice = self.select_samples(self.dataset.H - iH * 2, self.dataset.W - iW * 2,
+                                         self.config["tracking"]["sample"])
+
+            # Slicing
+            indice_h, indice_w = (
+                indice % (self.dataset.H - iH * 2), indice // (self.dataset.H - iH * 2))
+            rays_d_cam = (batch["direction"].squeeze(0)[iH:-iH, iW:-iW, :][indice_h, indice_w, :].to(self.device))
+        target_s = (batch["rgb"].squeeze(0)[iH:-iH, iW:-iW, :][indice_h, indice_w, :].to(self.device))
+        target_d = (batch["depth"].squeeze(0)[iH:-iH, iW:-iW][indice_h, indice_w].to(self.device).unsqueeze(-1))
+
+        rays_o = c2w_est[..., :3, -1].repeat(self.config["tracking"]["sample"], 1)
+        rays_d = torch.sum(rays_d_cam[..., None, :] * c2w_est[:, :3, :3], -1)
+
+        ret = self.model.forward(rays_o, rays_d, target_s, target_d)
+        for param in self.model.parameters():
+            param.requires_grad = True
+
+        return ret
+
     def predict_current_pose(self, frame_id, constant_speed=True):
         '''
         Predict current pose from previous pose using camera motion model
@@ -675,13 +720,17 @@ class CoSLAM():
 
                 if i % self.config['mapping']['map_every'] == 0:
                     self.current_frame_mapping(batch, i)
-                    self.global_BA(batch, i)
+                    # self.global_BA(batch, i)
 
                 # Add keyframe
                 if i % self.config['mapping']['keyframe_every'] == 0:
                     self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
                     print('add keyframe:', i)
-
+                    if i > 20:
+                        x = self.test(batch, i)
+                        print(
+                            "Loss: ", x["rgb_loss"].item(), "PSNR: ", x["psnr"].item()
+                        )
                 if i % self.config['mesh']['vis'] == 0:
                     self.save_mesh(i, voxel_size=self.config['mesh']['voxel_eval'])
                     pose_relative = self.convert_relative_pose()

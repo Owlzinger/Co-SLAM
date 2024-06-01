@@ -225,6 +225,9 @@ class TUMDataset(BaseDataset):
     def __len__(self):
         return self.num_frames
 
+    def increase_length(self, num_new_elements):
+        self.num_frames += num_new_elements
+
     def __getitem__(self, index):
         color_path = self.color_paths[index]
         depth_path = self.depth_paths[index]
