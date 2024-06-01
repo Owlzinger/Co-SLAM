@@ -411,19 +411,16 @@ class CoSLAM:
         # 获取所有关键帧的位姿
         # all the KF poses: 0, 5, 10, ... 每五个取一个
         # TODO 可能和越界有关
-        index_list = self.keyframeDatabase.frame_ids.tolist()
+        keyframe_ids = [i.item() for i in self.keyframeDatabase.frame_ids if i < cur_frame_id]
 
         # all the KF poses: 0, 5, 10, ...
         # 取出所有关键帧的 估计pose
-        poses = torch.stack([self.est_c2w_data[i] for i in index_list])
+        poses = torch.stack([self.est_c2w_data[i] for i in keyframe_ids])
 
         # frame ids for all KFs, used for update poses after optimization
-        frame_ids_all = self.keyframeDatabase.frame_ids
-        # 如果 self.keyframeDatabase.keyframe_list为空,则添加一个 0,否则返回 self.keyframeDatabase.keyframe_list
-        if len(self.keyframeDatabase.frame_ids) < 2:
+        frame_ids_all = torch.tensor(keyframe_ids)
+        if len(frame_ids_all) < 2:
             # 如果关键帧库的数量小于 2, 直接使用这些位姿,不做挑选
-            # TODO posed都不对
-
             poses_fixed = torch.nn.parameter.Parameter(poses).to(self.device)
             current_pose = self.est_c2w_data[cur_frame_id][None, ...]
             poses_all = torch.cat([poses_fixed, current_pose], dim=0)
@@ -435,11 +432,7 @@ class CoSLAM:
 
             if self.config["mapping"]["optim_cur"]:  # 是否优化当前帧
                 # 对于 TUM : True
-                (
-                    cur_rot,
-                    cur_trans,
-                    pose_optimizer,
-                ) = self.get_pose_param_optim(torch.cat([poses[1:], current_pose]))
+                cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(torch.cat([poses[1:], current_pose]))
                 pose_optim = self.matrix_from_tensor(cur_rot, cur_trans).to(self.device)
                 poses_all = torch.cat([poses_fixed, pose_optim], dim=0)
 
@@ -453,7 +446,7 @@ class CoSLAM:
         self.map_optimizer.zero_grad()
         if pose_optimizer is not None:
             pose_optimizer.zero_grad()
-
+        # 构建光线数据
         current_rays = torch.cat(
             [batch["direction"], batch["rgb"], batch["depth"][..., None]], dim=-1
         )
@@ -466,30 +459,32 @@ class CoSLAM:
             # rays [bs, 7]
             # frame_ids [bs]
             # sample_global_rays 对应论文中的全局采样即对所有的关键帧采样
-            # 而不是像 niceslam 一样维护一个关键帧 list
+            # rays是从全部关键帧中抽样一部分, ids 抽样部分对应的关键帧ID
             rays, ids = self.keyframeDatabase.sample_global_rays(
                 self.config["mapping"]["sample"]
             )
 
             # TODO: Checkpoint...
+            # 从当前 batch 中随机采样一个子集
             idx_cur = random.sample(
                 range(0, self.dataset.H * self.dataset.W),
                 max(
-                    self.config["mapping"]["sample"]
-                    // len(self.keyframeDatabase.frame_ids),
+                    self.config["mapping"]["sample"] // len(self.keyframeDatabase.frame_ids),
                     self.config["mapping"]["min_pixels_cur"],
-                ),
-            )
+                ), )
+            # 从当前 batch 中随机采样一个子集
             current_rays_batch = current_rays[idx_cur, :]
 
             rays = torch.cat([rays, current_rays_batch], dim=0)  # N, 7
-            # TODO 所有和config["mapping"]["keyframe_every"]有关的地方都要改
-            ids_all = torch.cat(
-                [
-                    ids // self.config["mapping"]["keyframe_every"],
-                    -torch.ones((len(idx_cur))),
-                ]
-            ).to(torch.int64)
+            # 对于每一个关键帧，ids_all 的值是该关键帧ID除以关键帧间隔的结果，对于非关键帧，它的值是-1。
+            # ids_all2 = torch.cat([ids // self.config["mapping"]["keyframe_every"], -torch.ones((len(idx_cur)))]).to(
+            #     torch.int64)
+            ids_all = torch.cat([
+                torch.tensor(
+                    [self.keyframeDatabase.frame_ids.tolist().index(id) if id in self.keyframeDatabase.frame_ids else -1
+                     for id
+                     in ids]), -torch.ones((len(idx_cur)))
+            ]).to(torch.int64)
 
             rays_d_cam = rays[..., :3].to(self.device)
             target_s = rays[..., 3:6].to(self.device)
@@ -518,15 +513,14 @@ class CoSLAM:
                 else:
                     print("Wait update")
                 self.map_optimizer.zero_grad()
-
+            # 更新关键帧姿态
             if (
                     pose_optimizer is not None
                     and (i + 1) % cfg["mapping"]["pose_accum_step"] == 0
             ):
                 # 姿态优化器在每个 pose_accum_step(5步)之后更新一次姿态参数。
                 pose_optimizer.step()
-                # get SE3 poses to do forward pass
-                # 计算新的位姿矩阵
+                # get SE3 poses to do forward pass 计算新的位姿矩阵
                 pose_optim = self.matrix_from_tensor(cur_rot, cur_trans)
                 pose_optim = pose_optim.to(self.device)
                 # So current pose is always unchanged
@@ -872,15 +866,32 @@ class CoSLAM:
                                                                     )
         )
 
+        # def convert_relative_pose(self):
+        #     poses = {}
+        #     for i in range(len(self.est_c2w_data)):
+        #         # 如果是关键帧
+        #         if i % self.config["mapping"]["keyframe_every"] == 0:
+        #             poses[i] = self.est_c2w_data[i]
+        #         else:
+        #             kf_id = i // self.config["mapping"]["keyframe_every"]
+        #             kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
+        #             c2w_key = self.est_c2w_data[kf_frame_id]
+        #             delta = self.est_c2w_data_rel[i]
+        #             poses[i] = delta @ c2w_key
+        #
+        #     return poses
+
     def convert_relative_pose(self):
         poses = {}
+        keyframe_ids_list = list(self.keyframeDatabase.frame_ids)
+
         for i in range(len(self.est_c2w_data)):
-            # TODO 检查和越界是否有关
-            if i % self.config["mapping"]["keyframe_every"] == 0:
+            # 如果是关键帧
+            if i in keyframe_ids_list:
                 poses[i] = self.est_c2w_data[i]
             else:
-                kf_id = i // self.config["mapping"]["keyframe_every"]
-                kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
+                # 找到最近的关键帧
+                kf_frame_id = max(kf.item() for kf in keyframe_ids_list if kf < i)
                 c2w_key = self.est_c2w_data[kf_frame_id]
                 delta = self.est_c2w_data_rel[i]
                 poses[i] = delta @ c2w_key
@@ -1035,7 +1046,7 @@ class CoSLAM:
                 # ***************** Mapping & Global BA*****************
                 if i % self.config["mapping"]["map_every"] == 0:  # 代码中是 5
                     self.current_frame_mapping(batch, i)
-                    # self.global_BA(batch, i)
+                    self.global_BA(batch, i)
 
                 # Add keyframe
                 # 目前的逻辑是前 30 帧没五帧加一个关键帧
