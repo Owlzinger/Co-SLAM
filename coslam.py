@@ -1,4 +1,3 @@
-from datetime import datetime
 import os
 # os.environ['TCNN_CUDA_ARCHITECTURES'] = '86'
 
@@ -74,15 +73,15 @@ class CoSLAM():
         '''
         Get the pre-defined bounds for the scene
         '''
-        self.bounding_box = torch.from_numpy(np.array(self.config['mapping']['bound'])).to(self.device)
-        self.marching_cube_bound = torch.from_numpy(np.array(self.config['mapping']['marching_cubes_bound'])).to(
+        self.bounding_box = torch.from_numpy(np.array(self.config['mapping']['bound'])).to(torch.float32).to(
             self.device)
+        self.marching_cube_bound = torch.from_numpy(np.array(self.config['mapping']['marching_cubes_bound'])).to(
+            torch.float32).to(self.device)
 
     def create_kf_database(self, config):
         '''
         Create the keyframe database
         '''
-        # TODO: 不是每五张选一张
         num_kf = int(self.dataset.num_frames // self.config['mapping']['keyframe_every'] + 1)
         print('#kf:', num_kf)
         print('#Pixels to save:', self.dataset.num_rays_to_save)
@@ -168,7 +167,7 @@ class CoSLAM():
         Returns:
             ret: dict
             loss: float
-        
+
         '''
         print('First frame mapping...')
         c2w = batch['c2w'][0].to(self.device)
@@ -198,7 +197,7 @@ class CoSLAM():
 
         # First frame will always be a keyframe
         self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
-        if self.config['mapping']['first_mesh']:  # True
+        if self.config['mapping']['first_mesh']:
             self.save_mesh(0)
 
         print('First frame mapping done')
@@ -215,7 +214,7 @@ class CoSLAM():
         Returns:
             ret: dict
             loss: float
-        
+
         '''
         if self.config['mapping']['cur_frame_iters'] <= 0:
             return
@@ -291,16 +290,13 @@ class CoSLAM():
             cur_frame_id: current frame id
         '''
         pose_optimizer = None
-        index_list = self.keyframeDatabase.frame_ids.tolist()
 
         # all the KF poses: 0, 5, 10, ...
         poses = torch.stack(
-            # [self.est_c2w_data[i] for i in range(0, cur_frame_id, self.config['mapping']['keyframe_every'])])
-            [self.est_c2w_data[i] for i in index_list])
+            [self.est_c2w_data[i] for i in range(0, cur_frame_id, self.config['mapping']['keyframe_every'])])
 
         # frame ids for all KFs, used for update poses after optimization
-        # frame_ids_all = torch.tensor(list(range(0, cur_frame_id, self.config['mapping']['keyframe_every'])))
-        frame_ids_all = self.keyframeDatabase.frame_ids
+        frame_ids_all = torch.tensor(list(range(0, cur_frame_id, self.config['mapping']['keyframe_every'])))
 
         if len(self.keyframeDatabase.frame_ids) < 2:
             poses_fixed = torch.nn.parameter.Parameter(poses).to(self.device)
@@ -396,51 +392,6 @@ class CoSLAM():
                 print('Update current pose')
                 self.est_c2w_data[cur_frame_id] = \
                     self.matrix_from_tensor(cur_rot[-1:], cur_trans[-1:]).detach().clone()[0]
-
-    def test(self, batch, frame_id):
-        c2w_gt = batch["c2w"][0].to(self.device)
-
-        # Initialize current pose
-        if self.config["tracking"]["iter_point"] > 0:  # iter_point=0
-            cur_c2w = self.est_c2w_data[frame_id]
-        else:
-            cur_c2w = self.predict_current_pose(
-                frame_id, self.config["tracking"]["const_speed"],  # Ture
-            )
-
-        indice = None
-
-        iW = self.config["tracking"]["ignore_edge_W"]
-        iH = self.config["tracking"]["ignore_edge_H"]
-
-        cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(cur_c2w[None, ...], mapping=False)
-
-        # Start tracking
-        pose_optimizer.zero_grad()
-        for param in self.model.parameters():
-            param.requires_grad = False
-        c2w_est = self.matrix_from_tensor(cur_rot, cur_trans)
-
-        # Note here we fix the sampled points for optimisation
-        if indice is None:
-            indice = self.select_samples(self.dataset.H - iH * 2, self.dataset.W - iW * 2,
-                                         self.config["tracking"]["sample"])
-
-            # Slicing
-            indice_h, indice_w = (
-                indice % (self.dataset.H - iH * 2), indice // (self.dataset.H - iH * 2))
-            rays_d_cam = (batch["direction"].squeeze(0)[iH:-iH, iW:-iW, :][indice_h, indice_w, :].to(self.device))
-        target_s = (batch["rgb"].squeeze(0)[iH:-iH, iW:-iW, :][indice_h, indice_w, :].to(self.device))
-        target_d = (batch["depth"].squeeze(0)[iH:-iH, iW:-iW][indice_h, indice_w].to(self.device).unsqueeze(-1))
-
-        rays_o = c2w_est[..., :3, -1].repeat(self.config["tracking"]["sample"], 1)
-        rays_d = torch.sum(rays_d_cam[..., None, :] * c2w_est[:, :3, :3], -1)
-
-        ret = self.model.forward(rays_o, rays_d, target_s, target_d)
-        for param in self.model.parameters():
-            param.requires_grad = True
-
-        return ret
 
     def predict_current_pose(self, frame_id, constant_speed=True):
         '''
@@ -616,7 +567,7 @@ class CoSLAM():
             pose_optimizer.step()
 
         if self.config['tracking']['best']:
-            # Use the pose with the smallest loss
+            # Use the pose with smallest loss
             self.est_c2w_data[frame_id] = best_c2w_est.detach().clone()[0]
         else:
             # Use the pose after the last iteration
@@ -631,9 +582,8 @@ class CoSLAM():
             self.est_c2w_data_rel[frame_id] = delta
 
         print(
-            'Best loss: {:.4f}, Last loss{:.4f}'.format(
-                F.l1_loss(best_c2w_est.to(self.device)[0, :3], c2w_gt[:3]).cpu().item(),
-                F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item()))
+            'Best loss: {}, Last loss{}'.format(F.l1_loss(best_c2w_est.to(self.device)[0, :3], c2w_gt[:3]).cpu().item(),
+                                                F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item()))
 
     def convert_relative_pose(self):
         poses = {}
@@ -676,7 +626,8 @@ class CoSLAM():
             self.cur_map_optimizer = optim.Adam(params_cur_mapping, betas=(0.9, 0.99))
 
     def save_mesh(self, i, voxel_size=0.05):
-        mesh_savepath = os.path.join(save_path, 'mesh_track{}.ply'.format(i))
+        mesh_savepath = os.path.join(self.config['data']['output'], self.config['data']['exp_name'],
+                                     'mesh_track{}.ply'.format(i))
         if self.config['mesh']['render_color']:
             color_func = self.model.render_surface_color
         else:
@@ -704,8 +655,8 @@ class CoSLAM():
                 depth_colormap[:, mask] = 255.
                 depth_colormap = depth_colormap.permute(1, 2, 0).cpu().numpy()
                 image = np.hstack((rgb, depth_colormap))
-                cv2.namedWindow('RGB-D'.format(), cv2.WINDOW_AUTOSIZE)
-                cv2.imshow('RGB-D'.format(), image)
+                cv2.namedWindow('RGB-D'.format(i), cv2.WINDOW_AUTOSIZE)
+                cv2.imshow('RGB-D'.format(i), image)
                 key = cv2.waitKey(1)
 
             # First frame mapping
@@ -720,38 +671,34 @@ class CoSLAM():
 
                 if i % self.config['mapping']['map_every'] == 0:
                     self.current_frame_mapping(batch, i)
-                    # self.global_BA(batch, i)
+                    self.global_BA(batch, i)
 
                 # Add keyframe
                 if i % self.config['mapping']['keyframe_every'] == 0:
                     self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
                     print('add keyframe:', i)
-                    if i > 20:
-                        x = self.test(batch, i)
-                        print(
-                            "Loss: ", x["rgb_loss"].item(), "PSNR: ", x["psnr"].item()
-                        )
+
                 if i % self.config['mesh']['vis'] == 0:
                     self.save_mesh(i, voxel_size=self.config['mesh']['voxel_eval'])
                     pose_relative = self.convert_relative_pose()
                     pose_evaluation(self.pose_gt, self.est_c2w_data, 1,
-                                    os.path.join(save_path), i)
+                                    os.path.join(self.config['data']['output'], self.config['data']['exp_name']), i)
                     pose_evaluation(self.pose_gt, pose_relative, 1,
-                                    os.path.join(save_path), i,
+                                    os.path.join(self.config['data']['output'], self.config['data']['exp_name']), i,
                                     img='pose_r', name='output_relative.txt')
 
                     if cfg['mesh']['visualisation']:
-                        cv2.namedWindow('Traj:'.format(), cv2.WINDOW_AUTOSIZE)
+                        cv2.namedWindow('Traj:'.format(i), cv2.WINDOW_AUTOSIZE)
                         traj_image = cv2.imread(
-                            os.path.join(save_path,
+                            os.path.join(self.config['data']['output'], self.config['data']['exp_name'],
                                          "pose_r_{}.png".format(i)))
                         # best_traj_image = cv2.imread(os.path.join(best_logdir_scene, "pose_r_{}.png".format(i)))
                         # image_show = np.hstack((traj_image, best_traj_image))
                         image_show = traj_image
-                        cv2.imshow('Traj:'.format(), image_show)
+                        cv2.imshow('Traj:'.format(i), image_show)
                         key = cv2.waitKey(1)
 
-        model_savepath = os.path.join(save_path,
+        model_savepath = os.path.join(self.config['data']['output'], self.config['data']['exp_name'],
                                       'checkpoint{}.pt'.format(i))
 
         self.save_ckpt(model_savepath)
@@ -759,9 +706,9 @@ class CoSLAM():
 
         pose_relative = self.convert_relative_pose()
         pose_evaluation(self.pose_gt, self.est_c2w_data, 1,
-                        os.path.join(save_path), i)
+                        os.path.join(self.config['data']['output'], self.config['data']['exp_name']), i)
         pose_evaluation(self.pose_gt, pose_relative, 1,
-                        os.path.join(save_path), i, img='pose_r',
+                        os.path.join(self.config['data']['output'], self.config['data']['exp_name']), i, img='pose_r',
                         name='output_relative.txt')
 
         # TODO: Evaluation of reconstruction
@@ -770,8 +717,6 @@ class CoSLAM():
 if __name__ == '__main__':
 
     print('Start running...')
-    current_time = datetime.now()
-    time_str = current_time.strftime("%m%d_%H%M")
     parser = argparse.ArgumentParser(
         description='Arguments for running the NICE-SLAM/iMAP*.'
     )
@@ -788,7 +733,7 @@ if __name__ == '__main__':
         cfg['data']['output'] = args.output
 
     print("Saving config and script...")
-    save_path = os.path.join(cfg["data"]["output"], cfg['data']['exp_name'] + time_str)
+    save_path = os.path.join(cfg["data"]["output"], cfg['data']['exp_name'])
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     shutil.copy("coslam.py", os.path.join(save_path, 'coslam.py'))
