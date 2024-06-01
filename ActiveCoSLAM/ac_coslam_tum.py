@@ -225,7 +225,7 @@ class CoSLAM:
         # model.eval()是利用到了所有网络连接。
 
         # Training
-        for i in range(n_iters):  # 1000
+        for i in trange(n_iters):  # 1000
             # ********************* 获得第0帧每个像素的颜色，深度，方向 *********************
             print("iter:", i + 1, "/", n_iters, "\r", end="")
 
@@ -723,8 +723,6 @@ class CoSLAM:
 
         # Start tracking
         pose_optimizer.zero_grad()
-        for param in self.model.parameters():
-            param.requires_grad = False
         c2w_est = self.matrix_from_tensor(cur_rot, cur_trans)
 
         # Note here we fix the sampled points for optimisation
@@ -742,9 +740,6 @@ class CoSLAM:
         rays_o = c2w_est[..., :3, -1].repeat(self.config["tracking"]["sample"], 1)
         rays_d = torch.sum(rays_d_cam[..., None, :] * c2w_est[:, :3, :3], -1)
         ret = self.model.forward(rays_o, rays_d, target_s, target_d)
-
-        for param in self.model.parameters():
-            param.requires_grad = True
 
         return ret
 
@@ -765,10 +760,7 @@ class CoSLAM:
         if self.config["tracking"]["iter_point"] > 0:  # iter_point=0
             cur_c2w = self.est_c2w_data[frame_id]
         else:
-            cur_c2w = self.predict_current_pose(
-                frame_id,
-                self.config["tracking"]["const_speed"],  # Ture
-            )
+            cur_c2w = self.predict_current_pose(frame_id, self.config["tracking"]["const_speed"])  # Ture
 
         indice = None
         best_sdf_loss = None
@@ -777,9 +769,7 @@ class CoSLAM:
         iW = self.config["tracking"]["ignore_edge_W"]
         iH = self.config["tracking"]["ignore_edge_H"]
 
-        cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(
-            cur_c2w[None, ...], mapping=False
-        )
+        cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(cur_c2w[None, ...], mapping=False)
 
         # Start tracking
         for i in range(self.config["tracking"]["iter"]):
@@ -850,12 +840,27 @@ class CoSLAM:
             self.est_c2w_data[frame_id] = c2w_est.detach().clone()[0]
 
         # Save relative pose of non-keyframes
-        # TODO 检查和越界是否有关
-        if frame_id % self.config["mapping"]["keyframe_every"] != 0:
-            kf_id = frame_id // self.config["mapping"]["keyframe_every"]
-            kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
-            c2w_key = self.est_c2w_data[kf_frame_id]
-            delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse()
+        # 检查是否是<非关键帧>: 假设当前帧frame_id是 8, 关键帧列表是 [0,5],self.config["mapping"]["keyframe_every"]=5
+        # if frame_id % self.config["mapping"]["keyframe_every"] != 0:
+        #     计算得到最近的关键帧的帧号kf_frame_id。
+        #     kf_id = frame_id // self.config["mapping"]["keyframe_every"] 8//5=1
+        #     kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"] 1*5=5, 所以离得最近的关键帧是5
+        #     从self.est_c2w_data字典中获取关键帧的位姿矩阵c2w_key
+        #     c2w_key = self.est_c2w_data[kf_frame_id]
+        #     计算当前帧相对于关键帧的相对位姿:这里用当前帧的位姿矩阵self.est_c2w_data[frame_id]
+        #     # 与关键帧位姿矩阵c2w_key的逆矩阵相乘，得到相对位姿delta。
+        #     delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse()
+        #     # 6. 将计算得到的相对位姿 delta 存储在 self.est_c2w_data_rel 字典中，键是当前帧的 frame_id，值是相对位姿 delta。
+        #     self.est_c2w_data_rel[frame_id] = delta
+        # 如果当前帧不是关键帧
+        if frame_id not in self.keyframeDatabase.frame_ids:
+            # 找到最近的关键帧,寻找小于 frame_id 的最大值来实现。
+            kf_frame_id = max(f for f in self.keyframeDatabase.frame_ids if f < frame_id)
+            # 获取最近关键帧的位姿矩阵
+            c2w_keyframe = self.est_c2w_data[kf_frame_id.item()]
+            # 计算当前帧相对于最近关键帧的相对位姿
+            delta = self.est_c2w_data[frame_id] @ c2w_keyframe.float().inverse()
+            # 将相对位姿存储在 est_c2w_data_rel 字典中
             self.est_c2w_data_rel[frame_id] = delta
 
         print(
@@ -964,7 +969,8 @@ class CoSLAM:
         # train_loader = DataLoader(
         #     train_dataset, num_workers=self.config["data"]["num_workers"]
         # )
-        i_end = len(train_dataset)
+        # i_end = len(train_dataset)
+        i_end = len(self.dataset)
         i = 0
 
         # for i, batch in tqdm(enumerate(train_loader)):
@@ -1010,17 +1016,18 @@ class CoSLAM:
             # First frame mapping
             # *******建立初始的地图和位姿估计********
             if i == 0:
+                # self.first_frame_mapping(
+                #     batch, self.config["mapping"]["first_iters"]
+                # )
                 self.first_frame_mapping(
-                    batch, self.config["mapping"]["first_iters"]
+                    batch, 100
                 )  # first_iters=1000
 
             # 建立每一帧的地图和位姿估计
             # Tracking + Mapping
             else:
-                # ****************** Testing ******************
-
                 # ***************** Tracking*****************
-                if self.config["tracking"]["iter_point"] > 0:  # # 通过点云来跟踪当前帧的相机位姿, 代码中是 False
+                if self.config["tracking"]["iter_point"] > 0:  # 通过点云来跟踪当前帧的相机位姿, 代码中是 False
                     self.tracking_pc(batch, i)
                 # 使用当前的 rgb 损失,深度损失,sdf 损失来跟踪当前帧的相机位姿
                 self.tracking_render(batch, i)
@@ -1101,7 +1108,7 @@ class CoSLAM:
 
                         pres = torch.cat(pres, 0)  # 40,
                         posts = torch.cat(posts, 0)  # 40
-                        topK = 3
+                        topK = 1
                         hold_out_index = np.sort((torch.topk(pres - posts, topK)[1].cpu().numpy()))
 
                         print(
@@ -1128,9 +1135,9 @@ class CoSLAM:
                                 )
                                 # 输出 self.keyframeDatabase.frame_ids的最后一个元素
                                 print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
-
-                        x = self.test(batch, i)
-                        print("\nRGB_loss: ", x["rgb_loss"].item(), "psnr: ", x["psnr"].item())
+                        with torch.no_grad():
+                            x = self.test(batch, i)
+                            print("\nRGB_loss: ", x["rgb_loss"].item(), "psnr: ", x["psnr"].item())
 
                 if i % self.config["mesh"]["vis"] == 0:
                     self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
@@ -1169,6 +1176,7 @@ class CoSLAM:
             i += 1
             i_end = len(train_dataset)
 
+        print("i_end: ", i_end)
         model_savepath = os.path.join(save_path, "checkpoint{}.pt".format(i))
 
         self.save_ckpt(model_savepath)
