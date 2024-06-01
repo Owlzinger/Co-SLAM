@@ -687,14 +687,16 @@ class CoSLAM:
         else:
             self.est_c2w_data[frame_id] = c2w_est.detach().clone()[0]
 
-        if frame_id % self.config["mapping"]["keyframe_every"] != 0:
-            # TODO 检查和越界是否有关
-            # Not a keyframe, need relative pose
-            kf_id = frame_id // self.config["mapping"]["keyframe_every"]
-            kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
-            c2w_key = self.est_c2w_data[kf_frame_id]
-            delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse()
+        if frame_id not in self.keyframeDatabase.frame_ids:
+            # 找到最近的关键帧,寻找小于 frame_id 的最大值来实现。
+            kf_frame_id = max(f for f in self.keyframeDatabase.frame_ids if f < frame_id)
+            # 获取最近关键帧的位姿矩阵
+            c2w_keyframe = self.est_c2w_data[kf_frame_id.item()]
+            # 计算当前帧相对于最近关键帧的相对位姿
+            delta = self.est_c2w_data[frame_id] @ c2w_keyframe.float().inverse()
+            # 将相对位姿存储在 est_c2w_data_rel 字典中
             self.est_c2w_data_rel[frame_id] = delta
+
         print(
             "Iter: {}, Best loss: {}, Camera loss{}".format(frame_id,
                                                             F.l1_loss(best_c2w_est.to(self.device)[0, :3],
@@ -833,7 +835,7 @@ class CoSLAM:
             pose_optimizer.step()
 
         if self.config["tracking"]["best"]:
-            # Use the pose with smallest loss
+            # Use the pose with the smallest loss
             self.est_c2w_data[frame_id] = best_c2w_est.detach().clone()[0]
         else:
             # Use the pose after the last iteration
@@ -842,15 +844,14 @@ class CoSLAM:
         # Save relative pose of non-keyframes
         # 检查是否是<非关键帧>: 假设当前帧frame_id是 8, 关键帧列表是 [0,5],self.config["mapping"]["keyframe_every"]=5
         # if frame_id % self.config["mapping"]["keyframe_every"] != 0:
-        #     计算得到最近的关键帧的帧号kf_frame_id。
+        ##     计算得到最近的关键帧的帧号kf_frame_id。
         #     kf_id = frame_id // self.config["mapping"]["keyframe_every"] 8//5=1
         #     kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"] 1*5=5, 所以离得最近的关键帧是5
-        #     从self.est_c2w_data字典中获取关键帧的位姿矩阵c2w_key
-        #     c2w_key = self.est_c2w_data[kf_frame_id]
-        #     计算当前帧相对于关键帧的相对位姿:这里用当前帧的位姿矩阵self.est_c2w_data[frame_id]
-        #     # 与关键帧位姿矩阵c2w_key的逆矩阵相乘，得到相对位姿delta。
+        ##     从self.est_c2w_data字典中获取关键帧的位姿矩阵c2w_keyframe
+        #     c2w_keyframe = self.est_c2w_data[kf_frame_id]
+        ##     计算当前帧相对于关键帧的相对位姿delta
         #     delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse()
-        #     # 6. 将计算得到的相对位姿 delta 存储在 self.est_c2w_data_rel 字典中，键是当前帧的 frame_id，值是相对位姿 delta。
+        ##     #相对位姿 delta 存储在 self.est_c2w_data_rel
         #     self.est_c2w_data_rel[frame_id] = delta
         # 如果当前帧不是关键帧
         if frame_id not in self.keyframeDatabase.frame_ids:
