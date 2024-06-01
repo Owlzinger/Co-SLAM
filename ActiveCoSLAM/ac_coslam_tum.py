@@ -696,10 +696,11 @@ class CoSLAM:
             delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse()
             self.est_c2w_data_rel[frame_id] = delta
         print(
-            "Best loss: {}, Camera loss{}".format(
-                F.l1_loss(best_c2w_est.to(self.device)[0, :3], c2w_gt[:3]).cpu().item(),
-                F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
-            )
+            "Iter: {}, Best loss: {}, Camera loss{}".format(frame_id,
+                                                            F.l1_loss(best_c2w_est.to(self.device)[0, :3],
+                                                                      c2w_gt[:3]).cpu().item(),
+                                                            F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
+                                                            )
         )
 
     def test(self, batch, frame_id):
@@ -858,10 +859,11 @@ class CoSLAM:
             self.est_c2w_data_rel[frame_id] = delta
 
         print(
-            "Best loss: {:.4f}, Last loss: {:.4f}".format(
-                F.l1_loss(best_c2w_est.to(self.device)[0, :3], c2w_gt[:3]).cpu().item(),
-                F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
-            )
+            "iter: {}, Best loss: {:.4f}, Last loss: {:.4f}".format(frame_id,
+                                                                    F.l1_loss(best_c2w_est.to(self.device)[0, :3],
+                                                                              c2w_gt[:3]).cpu().item(),
+                                                                    F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
+                                                                    )
         )
 
     def convert_relative_pose(self):
@@ -956,13 +958,31 @@ class CoSLAM:
 
         holdout_dataset_all = self.dataset.slice(range(init_image, dataset_size))
         # 循环次数= (总数-初始数)/每次添加的数
-        n_iter = (dataset_size - init_image) // self.config["active"]["choose_k"] + 1
+        # n_iter = (dataset_size - init_image) // self.config["active"]["choose_k"] + 1
         topK = self.config["active"]["choose_k"]
         # for i in range(1000):
-        train_loader = DataLoader(
-            train_dataset, num_workers=self.config["data"]["num_workers"]
-        )
-        for i, batch in tqdm(enumerate(train_loader)):
+        # train_loader = DataLoader(
+        #     train_dataset, num_workers=self.config["data"]["num_workers"]
+        # )
+        i_end = len(train_dataset)
+        i = 0
+
+        # for i, batch in tqdm(enumerate(train_loader)):
+        # 为什么不用 enumerate: 因为无法解决一个问题: train_loader 一开始的长度是 30,每次检查信息增益时,都会增加5个数据
+        # 但是 enumerate 是根据 train_loader 的初始长度来的,所以尽管 train_loader 的长度变了(变成35了),但是 enumerate 的长度不会变
+        # 循环到了 30 就会跳出,不会遍历新增加的数据了
+
+        while i < i_end:
+            batch = train_dataset[i]
+            # 为 batch 的每一个元素添加一个维度
+            # 为什么要增加一个维度: 举例 batch["c2d"] ->4*4
+            # 原始的 coslam 中使用 dataloader 遍历每一个元素(for i, batch in tqdm(enumerate(train_loader)):),
+            # DataLoader 默认会在第一个维度添加一个批次维度（即使只有一个样本）batch["c2w"]变为 1*4*4。
+            # 而 train_dataset[0] 直接返回的是 4*4 的矩阵，因为它只是一个单独的样本，没有批次维度。
+            # 为了尽量少改代码,所以需要手动增加一个维度
+            for key in batch:
+                if isinstance(batch[key], torch.Tensor):
+                    batch[key] = batch[key].unsqueeze(0)
             # batch = {
             # 'frame_id': [1],
             # 'c2w': [1, 4, 4],
@@ -970,7 +990,8 @@ class CoSLAM:
             # 'depth': [1, H, W, 1], 1*368*496
             # 'direction': [1, H, W, 3] 1*368*496
             # }
-
+            kfdb = self.keyframeDatabase
+            pogt = self.pose_gt
             # ******** Visualisation *************
             if self.config["mesh"]["visualisation"]:
                 rgb = cv2.cvtColor(
@@ -1040,7 +1061,7 @@ class CoSLAM:
                         holdout_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
                         for idx, batch in enumerate(holdout_loader):
                             # tqdm库在 pycharm 终端有显示错误
-                            # print("image:", idx + 1, "/", len(holdout_dataset), "\r", end="")
+                            print("image:", idx + 1, "/", len(holdout_dataset), "\r", end="")
 
                             rays_d_cam = batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device)
 
@@ -1090,11 +1111,11 @@ class CoSLAM:
                         # 选择信息增益最大的帧加入到 train_dataset 中
                         top_info_gain_from_holdout = holdout_dataset.slice(hold_out_index)
                         train_dataset = train_dataset + top_info_gain_from_holdout
-                        train_dataset.increase_length(len(top_info_gain_from_holdout))
+                        # train_dataset.increase_length(len(top_info_gain_from_holdout))
                         print("train_dataset length: ", len(train_dataset))
                         # 将信息增益最大的帧从 holdout_dataset 中删除
                         holdout_dataset_all = holdout_dataset_all.remove(hold_out_index)
-                        train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
+                        # train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
 
                         self.model.train()
                         # *********************************
@@ -1109,7 +1130,7 @@ class CoSLAM:
                                 print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
 
                         x = self.test(batch, i)
-                        print(x["rgb_loss"].item(), x["psnr"].item())
+                        print("\nRGB_loss: ", x["rgb_loss"].item(), "psnr: ", x["psnr"].item())
 
                 if i % self.config["mesh"]["vis"] == 0:
                     self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
@@ -1145,6 +1166,8 @@ class CoSLAM:
                         image_show = traj_image
                         cv2.imshow("Traj:".format(), image_show)
                         key = cv2.waitKey(1)
+            i += 1
+            i_end = len(train_dataset)
 
         model_savepath = os.path.join(save_path, "checkpoint{}.pt".format(i))
 
