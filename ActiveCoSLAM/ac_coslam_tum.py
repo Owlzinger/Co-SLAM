@@ -866,21 +866,6 @@ class CoSLAM:
                                                                     )
         )
 
-        # def convert_relative_pose(self):
-        #     poses = {}
-        #     for i in range(len(self.est_c2w_data)):
-        #         # 如果是关键帧
-        #         if i % self.config["mapping"]["keyframe_every"] == 0:
-        #             poses[i] = self.est_c2w_data[i]
-        #         else:
-        #             kf_id = i // self.config["mapping"]["keyframe_every"]
-        #             kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
-        #             c2w_key = self.est_c2w_data[kf_frame_id]
-        #             delta = self.est_c2w_data_rel[i]
-        #             poses[i] = delta @ c2w_key
-        #
-        #     return poses
-
     def convert_relative_pose(self):
         poses = {}
         keyframe_ids_list = list(self.keyframeDatabase.frame_ids)
@@ -970,7 +955,7 @@ class CoSLAM:
         self.create_optimizer()
         dataset_size = len(self.dataset)
         # init_image=self.config["data"]["init_image"]
-        init_image = 30
+        init_image = 200
         train_dataset = self.dataset.slice(range(0, init_image))
 
         holdout_dataset_all = self.dataset.slice(range(init_image, dataset_size))
@@ -1184,6 +1169,7 @@ class CoSLAM:
                         # image_show = np.hstack((traj_image, best_traj_image))
                         image_show = traj_image
                         cv2.imshow("Traj:".format(), image_show)
+                        cv2.imwrite('trajectory.png', image_show)
                         key = cv2.waitKey(1)
             i += 1
             i_end = len(train_dataset)
