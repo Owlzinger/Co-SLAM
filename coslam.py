@@ -717,6 +717,9 @@ class CoSLAM():
 if __name__ == '__main__':
 
     print('Start running...')
+    current_time = datetime.now()
+    time_str = current_time.strftime("%m%d_%H%M")
+
     parser = argparse.ArgumentParser(
         description='Arguments for running the NICE-SLAM/iMAP*.'
     )
@@ -733,10 +736,10 @@ if __name__ == '__main__':
         cfg['data']['output'] = args.output
 
     print("Saving config and script...")
-    save_path = os.path.join(cfg["data"]["output"], cfg['data']['exp_name'])
+    save_path = os.path.join(cfg["data"]["output"], cfg['data']['exp_name'] + time_str)
     if not os.path.exists(save_path):
         os.makedirs(save_path)
-    shutil.copy("coslam.py", os.path.join(save_path, 'coslam.py'))
+    # shutil.copy("coslam.py", os.path.join(save_path, 'coslam.py'))
 
     with open(os.path.join(save_path, 'config.json'), "w", encoding='utf-8') as f:
         f.write(json.dumps(cfg, indent=4))
