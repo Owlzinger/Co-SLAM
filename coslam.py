@@ -44,6 +44,7 @@ class CoSLAM():
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
 
     def get_pose_representation(self):
         '''
