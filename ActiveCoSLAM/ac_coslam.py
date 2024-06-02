@@ -2,19 +2,23 @@ import os
 
 # os.environ['TCNN_CUDA_ARCHITECTURES'] = '86'
 import time
+import random
+import argparse
+import shutil
+import json
+from datetime import datetime
 
 # Package imports
 import torch
 import torch.optim as optim
 import numpy as np
-import random
 import torch.nn.functional as F
-import argparse
-import shutil
-import json
+
 import cv2
 
 from torch.utils.data import DataLoader
+
+# from tqdm import tqdm
 from tqdm import tqdm
 from tqdm.rich import trange
 
@@ -23,10 +27,10 @@ import config
 
 from ActiveCoSLAM.ac_scene_rep import JointEncoding
 from ActiveCoSLAM.ac_dataset import get_dataset
-from ActiveCoSLAM.ac_utils import coordinates, extract_mesh, colormap_image
+from utils import coordinates, extract_mesh, colormap_image
+from ActiveCoSLAM.ac_keyframe import KeyFrameDatabase
 
 # from model.scene_rep import JointEncoding
-from model.keyframe import KeyFrameDatabase
 from tools.eval_ate import pose_evaluation
 from optimization.utils import (
     at_to_transform_matrix,
@@ -102,17 +106,23 @@ class CoSLAM:
         """
         Create the keyframe database
         """
-        # TODO 固定大小预分配的内存
-        # num_kf = int(
-        #     # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧, +1 是第一帧
-        #     # self.dataset.num_frames = 592
-        #     self.dataset.num_frames // self.config["mapping"]["keyframe_every"] + 1
-        # )
-        # print("#kf: ", num_kf)
+        # TODO 固定大小预分配的内存,可能和越界有关
+        num_kf = int(
+            # self.config["mapping"]["keyframe_every"] = 5 每五帧取一帧, +1 是第一帧 # self.dataset.num_frames = 592
+            self.dataset.num_frames // self.config["mapping"]["keyframe_every"] + 1
+        )
+        num_kf = 200
+        print("#kf: ", num_kf)
         # num_rays_to_save= total pixel *  5% (下采样)
         print("#Pixels to save: ", self.dataset.num_rays_to_save)
-        return KeyFrameDatabase(config, self.dataset.H, self.dataset.W, self.dataset.num_rays_to_save,
-                                self.device)
+        return KeyFrameDatabase(
+            config,
+            self.dataset.H,
+            self.dataset.W,
+            num_kf,
+            self.dataset.num_rays_to_save,
+            self.device,
+        )
 
     def load_gt_pose(self):
         """
@@ -221,7 +231,7 @@ class CoSLAM:
 
             self.map_optimizer.zero_grad()
             indice = self.select_samples(
-                # 从一个范围内的整数（0 到 H * W - 1）中随机选择samples=2048个样本像素
+                # 从一个范围内的整数（0 到 H * W - 1）中随机选择s2048个样本像素
                 # indice就是从 0 到 182528 之间随机选取 2048 个数作为 index
                 self.dataset.H,
                 self.dataset.W,
@@ -400,22 +410,16 @@ class CoSLAM:
         pose_optimizer = None
         # 获取所有关键帧的位姿
         # all the KF poses: 0, 5, 10, ... 每五个取一个
-        poses = torch.stack(
-            [
-                self.est_c2w_data[i]
-                for i in range(
-                0, cur_frame_id, self.config["mapping"]["keyframe_every"]
-            )
-            ]
-        )
+        # TODO 可能和越界有关
+        keyframe_ids = [i.item() for i in self.keyframeDatabase.frame_ids if i < cur_frame_id]
 
-        # 获取所有关键帧的位姿和 id
+        # all the KF poses: 0, 5, 10, ...
+        # 取出所有关键帧的 估计pose
+        poses = torch.stack([self.est_c2w_data[i] for i in keyframe_ids])
+
         # frame ids for all KFs, used for update poses after optimization
-        frame_ids_all = torch.tensor(
-            list(range(0, cur_frame_id, self.config["mapping"]["keyframe_every"]))
-        )
-
-        if len(self.keyframeDatabase.frame_ids) < 2:
+        frame_ids_all = torch.tensor(keyframe_ids)
+        if len(frame_ids_all) < 2:
             # 如果关键帧库的数量小于 2, 直接使用这些位姿,不做挑选
             poses_fixed = torch.nn.parameter.Parameter(poses).to(self.device)
             current_pose = self.est_c2w_data[cur_frame_id][None, ...]
@@ -428,21 +432,13 @@ class CoSLAM:
 
             if self.config["mapping"]["optim_cur"]:  # 是否优化当前帧
                 # 对于 TUM : True
-                (
-                    cur_rot,
-                    cur_trans,
-                    pose_optimizer,
-                ) = self.get_pose_param_optim(torch.cat([poses[1:], current_pose]))
+                cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(torch.cat([poses[1:], current_pose]))
                 pose_optim = self.matrix_from_tensor(cur_rot, cur_trans).to(self.device)
                 poses_all = torch.cat([poses_fixed, pose_optim], dim=0)
 
             else:
                 # 如果不优化当前帧, 就只加入 poses_all中就行了
-                (
-                    cur_rot,
-                    cur_trans,
-                    pose_optimizer,
-                ) = self.get_pose_param_optim(poses[1:])
+                cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(poses[1:])
                 pose_optim = self.matrix_from_tensor(cur_rot, cur_trans).to(self.device)
                 poses_all = torch.cat([poses_fixed, pose_optim, current_pose], dim=0)
 
@@ -450,7 +446,7 @@ class CoSLAM:
         self.map_optimizer.zero_grad()
         if pose_optimizer is not None:
             pose_optimizer.zero_grad()
-
+        # 构建光线数据
         current_rays = torch.cat(
             [batch["direction"], batch["rgb"], batch["depth"][..., None]], dim=-1
         )
@@ -463,29 +459,32 @@ class CoSLAM:
             # rays [bs, 7]
             # frame_ids [bs]
             # sample_global_rays 对应论文中的全局采样即对所有的关键帧采样
-            # 而不是像 niceslam 一样维护一个关键帧 list
+            # rays是从全部关键帧中抽样一部分, ids 抽样部分对应的关键帧ID
             rays, ids = self.keyframeDatabase.sample_global_rays(
                 self.config["mapping"]["sample"]
             )
 
             # TODO: Checkpoint...
+            # 从当前 batch 中随机采样一个子集
             idx_cur = random.sample(
                 range(0, self.dataset.H * self.dataset.W),
                 max(
-                    self.config["mapping"]["sample"]
-                    // len(self.keyframeDatabase.frame_ids),
+                    self.config["mapping"]["sample"] // len(self.keyframeDatabase.frame_ids),
                     self.config["mapping"]["min_pixels_cur"],
-                ),
-            )
+                ), )
+            # 从当前 batch 中随机采样一个子集
             current_rays_batch = current_rays[idx_cur, :]
 
             rays = torch.cat([rays, current_rays_batch], dim=0)  # N, 7
-            ids_all = torch.cat(
-                [
-                    ids // self.config["mapping"]["keyframe_every"],
-                    -torch.ones((len(idx_cur))),
-                ]
-            ).to(torch.int64)
+            # 对于每一个关键帧，ids_all 的值是该关键帧ID除以关键帧间隔的结果，对于非关键帧，它的值是-1。
+            # ids_all2 = torch.cat([ids // self.config["mapping"]["keyframe_every"], -torch.ones((len(idx_cur)))]).to(
+            #     torch.int64)
+            ids_all = torch.cat([
+                torch.tensor(
+                    [self.keyframeDatabase.frame_ids.tolist().index(id) if id in self.keyframeDatabase.frame_ids else -1
+                     for id
+                     in ids]), -torch.ones((len(idx_cur)))
+            ]).to(torch.int64)
 
             rays_d_cam = rays[..., :3].to(self.device)
             target_s = rays[..., 3:6].to(self.device)
@@ -514,15 +513,14 @@ class CoSLAM:
                 else:
                     print("Wait update")
                 self.map_optimizer.zero_grad()
-
+            # 更新关键帧姿态
             if (
                     pose_optimizer is not None
                     and (i + 1) % cfg["mapping"]["pose_accum_step"] == 0
             ):
                 # 姿态优化器在每个 pose_accum_step(5步)之后更新一次姿态参数。
                 pose_optimizer.step()
-                # get SE3 poses to do forward pass
-                # 计算新的位姿矩阵
+                # get SE3 poses to do forward pass 计算新的位姿矩阵
                 pose_optim = self.matrix_from_tensor(cur_rot, cur_trans)
                 pose_optim = pose_optim.to(self.device)
                 # So current pose is always unchanged
@@ -683,19 +681,63 @@ class CoSLAM:
         else:
             self.est_c2w_data[frame_id] = c2w_est.detach().clone()[0]
 
-        if frame_id % self.config["mapping"]["keyframe_every"] != 0:
-            # Not a keyframe, need relative pose
-            kf_id = frame_id // self.config["mapping"]["keyframe_every"]
-            kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
-            c2w_key = self.est_c2w_data[kf_frame_id]
-            delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse()
+        if frame_id not in self.keyframeDatabase.frame_ids:
+            # 找到最近的关键帧,寻找小于 frame_id 的最大值来实现。
+            kf_frame_id = max(f for f in self.keyframeDatabase.frame_ids if f < frame_id)
+            # 获取最近关键帧的位姿矩阵
+            c2w_keyframe = self.est_c2w_data[kf_frame_id.item()]
+            # 计算当前帧相对于最近关键帧的相对位姿
+            delta = self.est_c2w_data[frame_id] @ c2w_keyframe.float().inverse()
+            # 将相对位姿存储在 est_c2w_data_rel 字典中
             self.est_c2w_data_rel[frame_id] = delta
+
         print(
-            "Best loss: {}, Camera loss{}".format(
-                F.l1_loss(best_c2w_est.to(self.device)[0, :3], c2w_gt[:3]).cpu().item(),
-                F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
-            )
+            "Iter: {}, Best loss: {}, Camera loss{}".format(frame_id,
+                                                            F.l1_loss(best_c2w_est.to(self.device)[0, :3],
+                                                                      c2w_gt[:3]).cpu().item(),
+                                                            F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
+                                                            )
         )
+
+    def test(self, batch, frame_id):
+        c2w_gt = batch["c2w"][0].to(self.device)
+
+        # Initialize current pose
+        if self.config["tracking"]["iter_point"] > 0:  # iter_point=0
+            cur_c2w = self.est_c2w_data[frame_id]
+        else:
+            cur_c2w = self.predict_current_pose(
+                frame_id, self.config["tracking"]["const_speed"],  # Ture
+            )
+
+        indice = None
+
+        iW = self.config["tracking"]["ignore_edge_W"]
+        iH = self.config["tracking"]["ignore_edge_H"]
+
+        cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(cur_c2w[None, ...], mapping=False)
+
+        # Start tracking
+        pose_optimizer.zero_grad()
+        c2w_est = self.matrix_from_tensor(cur_rot, cur_trans)
+
+        # Note here we fix the sampled points for optimisation
+        if indice is None:
+            indice = self.select_samples(self.dataset.H - iH * 2, self.dataset.W - iW * 2,
+                                         self.config["tracking"]["sample"])
+
+            # Slicing
+            indice_h, indice_w = (
+                indice % (self.dataset.H - iH * 2), indice // (self.dataset.H - iH * 2))
+            rays_d_cam = (batch["direction"].squeeze(0)[iH:-iH, iW:-iW, :][indice_h, indice_w, :].to(self.device))
+        target_s = (batch["rgb"].squeeze(0)[iH:-iH, iW:-iW, :][indice_h, indice_w, :].to(self.device))
+        target_d = (batch["depth"].squeeze(0)[iH:-iH, iW:-iW][indice_h, indice_w].to(self.device).unsqueeze(-1))
+
+        rays_o = c2w_est[..., :3, -1].repeat(self.config["tracking"]["sample"], 1)
+        rays_d = torch.sum(rays_d_cam[..., None, :] * c2w_est[:, :3, :3], -1)
+        ret = self.model.forward(rays_o, rays_d, target_s, target_d)
+
+        return ret
 
     def tracking_render(self, batch, frame_id):
         """
@@ -714,10 +756,7 @@ class CoSLAM:
         if self.config["tracking"]["iter_point"] > 0:  # iter_point=0
             cur_c2w = self.est_c2w_data[frame_id]
         else:
-            cur_c2w = self.predict_current_pose(
-                frame_id,
-                self.config["tracking"]["const_speed"],  # Ture
-            )
+            cur_c2w = self.predict_current_pose(frame_id, self.config["tracking"]["const_speed"])  # Ture
 
         indice = None
         best_sdf_loss = None
@@ -726,9 +765,7 @@ class CoSLAM:
         iW = self.config["tracking"]["ignore_edge_W"]
         iH = self.config["tracking"]["ignore_edge_H"]
 
-        cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(
-            cur_c2w[None, ...], mapping=False
-        )
+        cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(cur_c2w[None, ...], mapping=False)
 
         # Start tracking
         for i in range(self.config["tracking"]["iter"]):
@@ -792,35 +829,54 @@ class CoSLAM:
             pose_optimizer.step()
 
         if self.config["tracking"]["best"]:
-            # Use the pose with smallest loss
+            # Use the pose with the smallest loss
             self.est_c2w_data[frame_id] = best_c2w_est.detach().clone()[0]
         else:
             # Use the pose after the last iteration
             self.est_c2w_data[frame_id] = c2w_est.detach().clone()[0]
 
         # Save relative pose of non-keyframes
-        if frame_id % self.config["mapping"]["keyframe_every"] != 0:
-            kf_id = frame_id // self.config["mapping"]["keyframe_every"]
-            kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
-            c2w_key = self.est_c2w_data[kf_frame_id]
-            delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse()
+        # 检查是否是<非关键帧>: 假设当前帧frame_id是 8, 关键帧列表是 [0,5],self.config["mapping"]["keyframe_every"]=5
+        # if frame_id % self.config["mapping"]["keyframe_every"] != 0:
+        ##     计算得到最近的关键帧的帧号kf_frame_id。
+        #     kf_id = frame_id // self.config["mapping"]["keyframe_every"] 8//5=1
+        #     kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"] 1*5=5, 所以离得最近的关键帧是5
+        ##     从self.est_c2w_data字典中获取关键帧的位姿矩阵c2w_keyframe
+        #     c2w_keyframe = self.est_c2w_data[kf_frame_id]
+        ##     计算当前帧相对于关键帧的相对位姿delta
+        #     delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse()
+        ##     #相对位姿 delta 存储在 self.est_c2w_data_rel
+        #     self.est_c2w_data_rel[frame_id] = delta
+        # 如果当前帧不是关键帧
+        if frame_id not in self.keyframeDatabase.frame_ids:
+            # 找到最近的关键帧,寻找小于 frame_id 的最大值来实现。
+            kf_frame_id = max(f for f in self.keyframeDatabase.frame_ids if f < frame_id)
+            # 获取最近关键帧的位姿矩阵
+            c2w_keyframe = self.est_c2w_data[kf_frame_id.item()]
+            # 计算当前帧相对于最近关键帧的相对位姿
+            delta = self.est_c2w_data[frame_id] @ c2w_keyframe.float().inverse()
+            # 将相对位姿存储在 est_c2w_data_rel 字典中
             self.est_c2w_data_rel[frame_id] = delta
 
         print(
-            "Best loss: {:.4f}, Last loss: {:.4f}".format(
-                F.l1_loss(best_c2w_est.to(self.device)[0, :3], c2w_gt[:3]).cpu().item(),
-                F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
-            )
+            "iter: {}, Best loss: {:.4f}, Last loss: {:.4f}".format(frame_id,
+                                                                    F.l1_loss(best_c2w_est.to(self.device)[0, :3],
+                                                                              c2w_gt[:3]).cpu().item(),
+                                                                    F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
+                                                                    )
         )
 
     def convert_relative_pose(self):
         poses = {}
+        keyframe_ids_list = list(self.keyframeDatabase.frame_ids)
+
         for i in range(len(self.est_c2w_data)):
-            if i % self.config["mapping"]["keyframe_every"] == 0:
+            # 如果是关键帧
+            if i in keyframe_ids_list:
                 poses[i] = self.est_c2w_data[i]
             else:
-                kf_id = i // self.config["mapping"]["keyframe_every"]
-                kf_frame_id = kf_id * self.config["mapping"]["keyframe_every"]
+                # 找到最近的关键帧
+                kf_frame_id = max(kf.item() for kf in keyframe_ids_list if kf < i)
                 c2w_key = self.est_c2w_data[kf_frame_id]
                 delta = self.est_c2w_data_rel[i]
                 poses[i] = delta @ c2w_key
@@ -877,10 +933,7 @@ class CoSLAM:
             self.cur_map_optimizer = optim.Adam(params_cur_mapping, betas=(0.9, 0.99))
 
     def save_mesh(self, i, voxel_size=0.05):
-        mesh_savepath = os.path.join(
-            save_path,
-            "mesh_track{}.ply".format(i),
-        )
+        mesh_savepath = os.path.join(save_path, "mesh_track{}.ply".format(i))
         if self.config["mesh"]["render_color"]:
             color_func = self.model.render_surface_color
         else:
@@ -895,264 +948,242 @@ class CoSLAM:
             mesh_savepath=mesh_savepath,
         )
 
+    def get_topK_index(self):
+        pass
+
     def run(self):
         self.create_optimizer()
         dataset_size = len(self.dataset)
         # init_image=self.config["data"]["init_image"]
-        init_image = 30
+        init_image = 200
         train_dataset = self.dataset.slice(range(0, init_image))
 
-        holdout_dataset = self.dataset.slice(range(init_image, dataset_size))
-        for i in range(10000):
-            train_loader = DataLoader(
-                train_dataset, num_workers=self.config["data"]["num_workers"]
-            )
-            for i, batch in tqdm(enumerate(train_loader)):
-                # batch = {
-                # 'frame_id': [1],
-                # 'c2w': [1, 4, 4],
-                # 'rgb': [1, H, W, 3], 1*368*496*3
-                # 'depth': [1, H, W, 1], 1*368*496
-                # 'direction': [1, H, W, 3] 1*368*496
-                # }
+        holdout_dataset_all = self.dataset.slice(range(init_image, dataset_size))
+        # 循环次数= (总数-初始数)/每次添加的数
+        # n_iter = (dataset_size - init_image) // self.config["active"]["choose_k"] + 1
+        topK = self.config["active"]["choose_k"]
+        # for i in range(1000):
+        # train_loader = DataLoader(
+        #     train_dataset, num_workers=self.config["data"]["num_workers"]
+        # )
+        # i_end = len(train_dataset)
+        i_end = len(self.dataset)
+        i = 0
 
-                # ******** Visualisation *************
-                if self.config["mesh"]["visualisation"]:
-                    rgb = cv2.cvtColor(
-                        batch["rgb"].squeeze().cpu().numpy(), cv2.COLOR_BGR2RGB
-                    )
-                    raw_depth = batch["depth"]
-                    mask = (raw_depth >= self.config["cam"]["depth_trunc"]).squeeze(0)
-                    depth_colormap = colormap_image(batch["depth"])
-                    depth_colormap[:, mask] = 255.0
-                    depth_colormap = depth_colormap.permute(1, 2, 0).cpu().numpy()
-                    image = np.hstack((rgb, depth_colormap))
-                    cv2.namedWindow("RGB-D".format(), cv2.WINDOW_AUTOSIZE)
-                    cv2.imshow("RGB-D".format(), image)
-                    key = cv2.waitKey(1)
+        # for i, batch in tqdm(enumerate(train_loader)):
+        # 为什么不用 enumerate: 因为无法解决一个问题: train_loader 一开始的长度是 30,每次检查信息增益时,都会增加5个数据
+        # 但是 enumerate 是根据 train_loader 的初始长度来的,所以尽管 train_loader 的长度变了(变成35了),但是 enumerate 的长度不会变
+        # 循环到了 30 就会跳出,不会遍历新增加的数据了
 
-                # First frame mapping
-                # *******建立初始的地图和位姿估计********
-                if i == 0:
-                    self.first_frame_mapping(
-                        batch, self.config["mapping"]["first_iters"]
-                    )  # first_iters=1000
+        while i < i_end:
+            batch = train_dataset[i]
+            # 为 batch 的每一个元素添加一个维度
+            # 为什么要增加一个维度: 举例 batch["c2d"] ->4*4
+            # 原始的 coslam 中使用 dataloader 遍历每一个元素(for i, batch in tqdm(enumerate(train_loader)):),
+            # DataLoader 默认会在第一个维度添加一个批次维度（即使只有一个样本）batch["c2w"]变为 1*4*4。
+            # 而 train_dataset[0] 直接返回的是 4*4 的矩阵，因为它只是一个单独的样本，没有批次维度。
+            # 为了尽量少改代码,所以需要手动增加一个维度
+            for key in batch:
+                if isinstance(batch[key], torch.Tensor):
+                    batch[key] = batch[key].unsqueeze(0)
+            # batch = {
+            # 'frame_id': [1],
+            # 'c2w': [1, 4, 4],
+            # 'rgb': [1, H, W, 3], 1*368*496*3
+            # 'depth': [1, H, W, 1], 1*368*496
+            # 'direction': [1, H, W, 3] 1*368*496
+            # }
+            kfdb = self.keyframeDatabase
+            pogt = self.pose_gt
+            # ******** Visualisation *************
+            if self.config["mesh"]["visualisation"]:
+                rgb = cv2.cvtColor(
+                    batch["rgb"].squeeze().cpu().numpy(), cv2.COLOR_BGR2RGB
+                )
+                raw_depth = batch["depth"]
+                mask = (raw_depth >= self.config["cam"]["depth_trunc"]).squeeze(0)
+                depth_colormap = colormap_image(batch["depth"])
+                depth_colormap[:, mask] = 255.0
+                depth_colormap = depth_colormap.permute(1, 2, 0).cpu().numpy()
+                image = np.hstack((rgb, depth_colormap))
+                cv2.namedWindow("RGB-D".format(), cv2.WINDOW_AUTOSIZE)
+                cv2.imshow("RGB-D".format(), image)
+                key = cv2.waitKey(1)
 
-                # 建立每一帧的地图和位姿估计
-                # Tracking + Mapping
-                else:
-                    # ***************** Tracking*****************
-                    if self.config["tracking"]["iter_point"] > 0:  # 代码中是 False
-                        # 通过点云来跟踪当前帧的相机位姿
-                        self.tracking_pc(batch, i)
-                    # 使用当前的 rgb 损失,深度损失,sdf 损失来跟踪当前帧的相机位姿
-                    self.tracking_render(batch, i)
-                    # ***************** Mapping & Global BA*****************
-                    if i % self.config["mapping"]["map_every"] == 0:
-                        self.current_frame_mapping(batch, i)
-                        self.global_BA(batch, i)
+            # First frame mapping
+            # *******建立初始的地图和位姿估计********
+            if i == 0:
+                self.first_frame_mapping(
+                    batch, self.config["mapping"]["first_iters"]
+                )
+                # self.first_frame_mapping(
+                #     batch, 100
+                # )  # first_iters=1000
 
-                    # Add keyframe
-                    # 前 20 个图片每五张图片加一个关键帧
-                    if i % self.config["mapping"]["keyframe_every"] == 0 and i < 20:
-                        self.keyframeDatabase.add_keyframe(
-                            batch, filter_depth=self.config["mapping"]["filter_depth"]
-                        )
+            # 建立每一帧的地图和位姿估计
+            # Tracking + Mapping
+            else:
+                # ***************** Tracking*****************
+                if self.config["tracking"]["iter_point"] > 0:  # 通过点云来跟踪当前帧的相机位姿, 代码中是 False
+                    self.tracking_pc(batch, i)
+                # 使用当前的 rgb 损失,深度损失,sdf 损失来跟踪当前帧的相机位姿
+                self.tracking_render(batch, i)
+                # ***************** Mapping & Global BA*****************
+                if i % self.config["mapping"]["map_every"] == 0:  # 代码中是 5
+                    self.current_frame_mapping(batch, i)
+                    self.global_BA(batch, i)
+
+                # Add keyframe
+                # 目前的逻辑是前 30 帧没五帧加一个关键帧
+                # 从 30 帧开始,每过 x 帧(这里是 5 帧)使用信息增益选择关键帧
+                # 前 30 个图片每五张图片加一个关键帧,这里应该没问题
+                if i % self.config["mapping"]["keyframe_every"] == 0:
+                    if i <= 20:
+                        self.keyframeDatabase.add_keyframe(batch,
+                                                           filter_depth=self.config["mapping"]["filter_depth"])
                         print("add keyframe:", i)
-                    # 从第 20个图片开始,每 5 张图片使用信息增益进行一次关键帧选择
-                    elif i % self.config["mapping"]["keyframe_every"] == 0:
-                        downsampled_H, downsampled_W = (
-                            self.dataset.H // 4,
-                            self.dataset.W // 4,
-                        )  # 只取 1/4 的点,
+                    # 从第 30个图片开始,每 5 张图片使用信息增益进行一次关键帧选择
+                    else:
+                        downsampled_H, downsampled_W = (self.dataset.H // 2, self.dataset.W // 2)  # 只取 1/4 的点,
                         # 原论文是 1/2的点, 但会出现 OOM
                         samples_num = downsampled_H * downsampled_W  # 采样点数量
                         # *********添加关键帧***************************
                         # print('before evaluation:', i_train, i_holdout.min(), i_holdout.max())
                         # *******************************************
                         print("\nstart evaluation:")
-                        indice = self.select_samples(
-                            # 图像 H*W 368*496, samples=45632
-                            # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
-                            self.dataset.H,
-                            self.dataset.W,
-                            samples_num,
-                        )
-                        indice_h, indice_w = (
-                            indice % self.dataset.H,
-                            indice // self.dataset.H,
-                        )
+                        # 图像 H*W 368*496, samples=45632
+                        # indice就是从 0 到 182528 之间随机选取 45632 个数作为 index
+                        indice = self.select_samples(self.dataset.H, self.dataset.W, samples_num)
+                        indice_h, indice_w = (indice % self.dataset.H, indice // self.dataset.H)
                         pres = []
                         posts = []
                         self.model.eval()
-                        holdout_loader = DataLoader(
-                            holdout_dataset,
-                            num_workers=self.config["data"]["num_workers"],
-                        )
-                        for i, batch in enumerate(holdout_loader):
+                        # 从第 i 帧开始后面的十个图像作为 holdout 数据集,计算信息增益
+                        # 第一次根据信息增益选择的时候, i=20, 关键帧库中的关键帧是 0,5,10,15.
+                        # 我想选择 16-25帧作为保留集, i-4=16, i-4+11=26
+                        holdout_dataset = self.dataset.slice(range(i - 4, i - 4 + 10))
+                        holdout_loader = DataLoader(holdout_dataset, num_workers=self.config["data"]["num_workers"])
+                        for idx, batch in enumerate(holdout_loader):
                             # tqdm库在 pycharm 终端有显示错误
-                            print(
-                                "image:",
-                                i + 1,
-                                "/",
-                                len(holdout_loader.dataset),
-                                "\r",
-                                end="",
-                            )
+                            print("image:", idx + 1, "/", len(holdout_dataset), "\r", end="")
 
-                            rays_d_cam = (
-                                batch["direction"]
-                                .squeeze(0)[indice_h, indice_w, :]
-                                .to(self.device)
-                            )
+                            rays_d_cam = batch["direction"].squeeze(0)[indice_h, indice_w, :].to(self.device)
 
-                            target_s = (
-                                batch["rgb"]
-                                .squeeze(0)[indice_h, indice_w, :]
-                                .to(self.device)
-                            )
+                            target_s = batch["rgb"].squeeze(0)[indice_h, indice_w, :].to(self.device)
 
-                            target_d = (
-                                batch["depth"]
-                                .squeeze(0)[indice_h, indice_w]
-                                .to(self.device)
-                                .unsqueeze(-1)
-                            )
+                            target_d = batch["depth"].squeeze(0)[indice_h, indice_w].to(self.device).unsqueeze(-1)
 
                             c2w = batch["c2w"][0].to(self.device)
 
                             rays_o = c2w[None, :3, -1].repeat(samples_num, 1)
-                            rays_d = torch.sum(
-                                rays_d_cam[..., None, :] * c2w[:3, :3], -1
-                            )
+                            rays_d = torch.sum(rays_d_cam[..., None, :] * c2w[:3, :3], -1)
 
                             with torch.no_grad():
-                                rend_dict = self.model.forward(
-                                    rays_o, rays_d, target_s, target_d
-                                )
+                                rend_dict = self.model.forward(rays_o, rays_d, target_s, target_d)
 
-                            uncert_render = (
-                                    rend_dict["uncert_map"].reshape(-1, samples_num, 1)
-                                    + 1e-9
-                            )
+                            uncert_render = rend_dict["uncert_map"].reshape(-1, samples_num, 1) + 1e-9
+
                             # 1,160000,1 新数据集r2(holdout数据集)的不确定度 beta, \beta^2(r_2)
                             uncert_pts = (
-                                    rend_dict["raw"][..., -1].reshape(
-                                        -1,
-                                        samples_num,
-                                        self.config["training"]["n_samples_d"]
-                                        + self.config["training"]["n_importance"]
-                                        + self.config["training"]["n_range_d"],
-                                    )
-                                    + 1e-9
+                                    rend_dict["raw"][..., -1].reshape(-1, samples_num,
+                                                                      self.config["training"]["n_samples_d"]
+                                                                      + self.config["training"]["n_importance"]
+                                                                      + self.config["training"]["n_range_d"],
+                                                                      ) + 1e-9
                             )
-                            weight_pts = rend_dict["weights"].reshape(
-                                -1,
-                                samples_num,
-                                self.config["training"]["n_samples_d"]  # 64
-                                + self.config["training"]["n_importance"]  # 0
-                                + self.config["training"]["n_range_d"],  # 21
-                            )  # 1,160000,192
+                            weight_pts = rend_dict["weights"].reshape(-1, samples_num,
+                                                                      self.config["training"]["n_samples_d"]  # 64
+                                                                      + self.config["training"]["n_importance"]  # 0
+                                                                      + self.config["training"]["n_range_d"],  # 21
+                                                                      )  # 1,160000,192
 
                             pre = uncert_pts.sum([1, 2])  # 1,160000,192->1
 
-                            post = (
-                                    1.0
-                                    / (
-                                            1.0 / uncert_pts
-                                            + weight_pts * weight_pts / uncert_render
-                                    )
-                            ).sum([1, 2])
+                            post = (1.0 / (1.0 / uncert_pts + weight_pts * weight_pts / uncert_render)).sum([1, 2])
                             pres.append(pre)
                             posts.append(post)
 
                         pres = torch.cat(pres, 0)  # 40,
                         posts = torch.cat(posts, 0)  # 40
-                        diff = pres - posts
-                        hold_out_index = (
-                            # torch.topk(pres - posts, self.config["active"]["choose_k"])[1]
-                            torch.topk(pres - posts, 10)[1].cpu().numpy()
-                        )
+                        topK = 1
+                        hold_out_index = np.sort((torch.topk(pres - posts, topK)[1].cpu().numpy()))
 
                         print(
                             "the top info gain Frame-ids: ",
-                            [holdout_dataset.frame_ids[i] for i in hold_out_index],
+                            [holdout_dataset.frame_ids[idx] for idx in hold_out_index]
                         )
                         # 选择信息增益最大的帧加入到 train_dataset 中
-                        top_info_gain_from_holdout = holdout_dataset.slice(
-                            hold_out_index
-                        )
+                        top_info_gain_from_holdout = holdout_dataset.slice(hold_out_index)
                         train_dataset = train_dataset + top_info_gain_from_holdout
-
+                        # train_dataset.increase_length(len(top_info_gain_from_holdout))
+                        print("train_dataset length: ", len(train_dataset))
                         # 将信息增益最大的帧从 holdout_dataset 中删除
-                        holdout_dataset = holdout_dataset.remove(hold_out_index)
+                        holdout_dataset_all = holdout_dataset_all.remove(hold_out_index)
+                        # train_loader = DataLoader(train_dataset, num_workers=self.config["data"]["num_workers"])
 
                         self.model.train()
-                        # **************************
+                        # *********************************
 
                         print("add keyframe Ids: ", end="")
                         for batch in top_info_gain_from_holdout:
-                            self.keyframeDatabase.add_keyframe(
-                                batch, filter_depth=self.config["mapping"]["filter_depth"]
-                            )
-                            # 输出 self.keyframeDatabase.frame_ids的最后一个元素
-                            print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
-
-                    if i % self.config["mesh"]["vis"] == 0:
-                        self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
-                        pose_relative = self.convert_relative_pose()
-                        pose_evaluation(
-                            self.pose_gt,
-                            self.est_c2w_data,
-                            1,
-                            os.path.join(save_path),
-                            i,
-                        )
-                        pose_evaluation(
-                            self.pose_gt,
-                            pose_relative,
-                            1,
-                            os.path.join(save_path),
-                            i,
-                            img="pose_r",
-                            name="output_relative.txt",
-                        )
-
-                        if cfg["mesh"]["visualisation"]:
-                            cv2.namedWindow("Traj:".format(), cv2.WINDOW_AUTOSIZE)
-                            traj_image = cv2.imread(
-                                os.path.join(
-                                    self.config["data"]["output"],
-                                    self.config["data"]["exp_name"],
-                                    "pose_r_{}.png".format(i),
+                            if batch["frame_id"] not in self.keyframeDatabase.frame_ids:
+                                self.keyframeDatabase.add_keyframe(
+                                    batch, filter_depth=self.config["mapping"]["filter_depth"]
                                 )
-                            )
-                            # best_traj_image = cv2.imread(os.path.join(best_logdir_scene, "pose_r_{}.png".format(i)))
-                            # image_show = np.hstack((traj_image, best_traj_image))
-                            image_show = traj_image
-                            cv2.imshow("Traj:".format(), image_show)
-                            key = cv2.waitKey(1)
+                                # 输出 self.keyframeDatabase.frame_ids的最后一个元素
+                                print(self.keyframeDatabase.frame_ids[-1].item(), end=" ")
+                        with torch.no_grad():
+                            x = self.test(batch, i)
+                            print("\nRGB_loss: ", x["rgb_loss"].item(), "psnr: ", x["psnr"].item())
 
-        model_savepath = os.path.join(
-            save_path,
-            "checkpoint{}.pt".format(i),
-        )
+                if i % self.config["mesh"]["vis"] == 0:
+                    self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_eval"])
+                    pose_relative = self.convert_relative_pose()
+                    pose_evaluation(
+                        self.pose_gt,
+                        self.est_c2w_data,
+                        1,
+                        os.path.join(save_path),
+                        i,
+                    )
+                    pose_evaluation(
+                        self.pose_gt,
+                        pose_relative,
+                        1,
+                        os.path.join(save_path),
+                        i,
+                        img="pose_r",
+                        name="output_relative.txt",
+                    )
+
+                    if cfg["mesh"]["visualisation"]:
+                        cv2.namedWindow("Traj:".format(), cv2.WINDOW_AUTOSIZE)
+                        traj_image = cv2.imread(
+                            os.path.join(
+                                self.config["data"]["output"],
+                                self.config["data"]["exp_name"],
+                                "pose_r_{}.png".format(i),
+                            )
+                        )
+                        # best_traj_image = cv2.imread(os.path.join(best_logdir_scene, "pose_r_{}.png".format(i)))
+                        # image_show = np.hstack((traj_image, best_traj_image))
+                        image_show = traj_image
+                        cv2.imshow("Traj:".format(), image_show)
+                        cv2.imwrite('trajectory.png', image_show)
+                        key = cv2.waitKey(1)
+            i += 1
+            i_end = len(train_dataset)
+
+        print("i_end: ", i_end)
+        model_savepath = os.path.join(save_path, "checkpoint{}.pt".format(i))
 
         self.save_ckpt(model_savepath)
         self.save_mesh(i, voxel_size=self.config["mesh"]["voxel_final"])
 
         pose_relative = self.convert_relative_pose()
         pose_evaluation(self.pose_gt, self.est_c2w_data, 1, os.path.join(save_path), i)
-        pose_evaluation(
-            self.pose_gt,
-            pose_relative,
-            1,
-            os.path.join(save_path),
-            i,
-            img="pose_r",
-            name="output_relative.txt",
-        )
-
+        pose_evaluation(self.pose_gt, pose_relative, 1, os.path.join(save_path), i, img="pose_r",
+                        name="output_relative.txt", )
         # TODO: Evaluation of reconstruction
 
 
@@ -1186,14 +1217,14 @@ if __name__ == "__main__":
     save_path = os.path.join(cfg["data"]["output"], cfg["data"]["exp_name"] + time_str)
     if not os.path.exists(save_path):
         os.makedirs(save_path)
-    shutil.copy("ActiveCoSLAM/ac_coslam.py", os.path.join(save_path, "ac_coslam.py"))
+    # shutil.copy("ActiveCoSLAM/ac_coslam.py", os.path.join(save_path, "ac_coslam.py"))
 
     with open(os.path.join(save_path, "config.json"), "w", encoding="utf-8") as f:
         f.write(json.dumps(cfg, indent=4))
     start_time = time.time()  # 开始时间
-    # ******
 
     slam = CoSLAM(cfg)
+    slam.seed_everything(0)
 
     slam.run()
     # print(slam.keyframeDatabase.frame_ids)
