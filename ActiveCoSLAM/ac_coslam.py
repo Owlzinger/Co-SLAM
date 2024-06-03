@@ -270,7 +270,7 @@ class CoSLAM:
             ret = self.model.forward(rays_o, rays_d, target_s, target_d)
             loss = self.get_loss_from_ret(ret)
             # ********************* 反响传播: 优化encoder/decoder网络的参数 *********************
-
+            # print("it: ", i, "Loss: ", loss.item())
             loss.backward()
             self.map_optimizer.step()
 

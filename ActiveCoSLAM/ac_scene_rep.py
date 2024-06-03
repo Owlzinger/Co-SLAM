@@ -4,7 +4,7 @@ import torch.nn as nn
 
 # Local imports
 from model.encodings import get_encoder
-from ActiveCoSLAM.ac_decoder import ColorSDFNet, ColorSDFNet_v3
+from ActiveCoSLAM.ac_decoder import ColorSDFNet_v3
 from model.utils import sample_pdf, batchify, get_sdf_loss, mse2psnr, compute_loss
 
 
@@ -94,9 +94,10 @@ class JointEncoding(nn.Module):
         ColorSDFNet_v2有 SDF Grid 和 Color Grid
         """
         if not self.config["grid"]["oneGrid"]:
-            self.decoder = ColorSDFNet(
-                config, input_ch=self.input_ch, input_ch_pos=self.input_ch_pos
-            )
+            # self.decoder = ColorSDFNet(
+            #     config, input_ch=self.input_ch, input_ch_pos=self.input_ch_pos
+            # )
+            pass
         else:
             # CoSLAM with active Learning
             self.decoder = ColorSDFNet_v3(
@@ -149,7 +150,7 @@ class JointEncoding(nn.Module):
         """
         rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 5]
         # raw光线的前三列是rgb值[N_rays, N_samples, 3][2048, 85, 3]
-        uncert = torch.nn.functional.softplus(raw[..., -1]) + self.beta_min
+        uncert = raw[..., 4]
         # raw的最后一列是不确定度, unsqueeze(-1)是为了和rgb的维度对齐,softplus是为了保证不确定度是正数
         weights = self.sdf2weights(raw[..., 3], z_vals, args=self.config)  # 通过raw的第四列深度值sdf,得到论文公式5的权重  [2048,85]
         rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3] 论文4式，计算rgb图 [N_rays, 3] [2048,3]
@@ -182,7 +183,8 @@ class JointEncoding(nn.Module):
 
         embedded_pos = self.embedpos_fn(inputs_flat)
         out = self.sdf_net(torch.cat([embedded, embedded_pos], dim=-1))
-        sdf, geo_feat, beta = out[..., :1], out[..., 1:-1], out[..., -1]
+        beta = self.decoder.beta
+        sdf, geo_feat = out[..., :1], out[..., 1:]
 
         sdf = torch.reshape(sdf, list(query_points.shape[:-1]))
         if not return_geo:  # 如果 return_geo 为 False, 则只返回 sdf
@@ -222,26 +224,26 @@ class JointEncoding(nn.Module):
     # 
     #     return sdf, geo_feat
 
-    def query_beta(self, query_points, embed=False):
-        """
-        没用到这个函数
-        Get the beta / variance value of the query points
-        Params:
-            query_points: [N_rays, N_samples, 3]
-        Returns:
-            sdf: [N_rays, N_samples]
-            geo_feat: [N_rays, N_samples, channel]
-        """
-        # query_points: 65536,1,3
-        inputs_flat = torch.reshape(query_points, [-1, query_points.shape[-1]])  # 65536,3
-
-        embedded = self.embed_fn(inputs_flat)  # 65536,32
-        embedded_pos = self.embedpos_fn(inputs_flat)  # 65536,48
-        out = self.sdf_net(torch.cat([embedded, embedded_pos], dim=-1))  # 65536,17
-        beta = out[..., -1]  # 1,15,1
-        beta = torch.reshape(beta, list(query_points.shape[:-1]))
-
-        return beta
+    # def query_beta(self, query_points, embed=False):
+    #     """
+    #     没用到这个函数
+    #     Get the beta / variance value of the query points
+    #     Params:
+    #         query_points: [N_rays, N_samples, 3]
+    #     Returns:
+    #         sdf: [N_rays, N_samples]
+    #         geo_feat: [N_rays, N_samples, channel]
+    #     """
+    #     # query_points: 65536,1,3
+    #     inputs_flat = torch.reshape(query_points, [-1, query_points.shape[-1]])  # 65536,3
+    #
+    #     embedded = self.embed_fn(inputs_flat)  # 65536,32
+    #     embedded_pos = self.embedpos_fn(inputs_flat)  # 65536,48
+    #     out = self.sdf_net(torch.cat([embedded, embedded_pos], dim=-1))  # 65536,17
+    #     beta = out[..., -1]  # 1,15,1
+    #     beta = torch.reshape(beta, list(query_points.shape[:-1]))
+    #
+    #     return beta
 
     def query_color(self, query_points):
         return torch.sigmoid(self.query_color_sdf_beta(query_points)[..., :3])
@@ -478,9 +480,12 @@ class JointEncoding(nn.Module):
         if uncert.min() > 0:
             # leave alpha as 0
             # self.w是控制正则化项的权重
-            rgb_loss = self.img2mse_uncert_alpha(
-                rend_dict["rgb"] * rgb_weight, target_rgb * rgb_weight,
-                uncert, alpha, self.w)
+            # rgb_loss = self.img2mse_uncert_alpha(
+            #     rend_dict["rgb"] * rgb_weight, target_rgb * rgb_weight,
+            #     uncert, alpha, self.w)
+            rgb_loss = compute_loss(
+                rend_dict["rgb"] * rgb_weight, target_rgb * rgb_weight
+            )
         else:
             rgb_loss = compute_loss(
                 rend_dict["rgb"] * rgb_weight, target_rgb * rgb_weight

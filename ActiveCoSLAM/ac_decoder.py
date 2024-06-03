@@ -15,6 +15,7 @@ class SDFNet(nn.Module):
         self.num_layers = num_layers
         self.isActive = config['active']['isActive']
         self.model = self.get_model(tcnn_network=config['decoder']['tcnn_network'])
+        self.output_dim = 1 + self.geo_feat_dim
 
     def forward(self, x, return_geo=True):
         out = self.model(x)
@@ -30,7 +31,7 @@ class SDFNet(nn.Module):
             print('SDF net: using tcnn')
             return tcnn.Network(
                 n_input_dims=self.input_ch,
-                n_output_dims=1 + self.geo_feat_dim + 1,
+                n_output_dims=1 + self.geo_feat_dim,
                 network_config={
                     "otype": "FullyFusedMLP",
                     "activation": "ReLU",
@@ -49,17 +50,15 @@ class SDFNet(nn.Module):
                     in_dim = self.hidden_dim
 
                 if l == self.num_layers - 1:
-                    if self.isActive:
-                        out_dim = 2 + self.geo_feat_dim  # 1 sigma + 15 SH features for color + 1 beta/不确定度 ---> 17
-                    else:
-                        out_dim = 1 + self.geo_feat_dim
+                    out_dim = 1 + self.geo_feat_dim  # 1 sigma + 15 SH features for color + 1 beta/不确定度 ---> 17
+
                 else:
                     out_dim = self.hidden_dim
 
                 sdf_net.append(nn.Linear(in_dim, out_dim, bias=False))
                 if l != self.num_layers - 1:
                     sdf_net.append(nn.ReLU(inplace=True))
-
+            self.output_dim = out_dim
             return nn.Sequential(*nn.ModuleList(sdf_net))
 
 
@@ -135,6 +134,8 @@ class ColorSDFNet_v3(nn.Module):
                                   geo_feat_dim=config['decoder']['geo_feat_dim'],
                                   hidden_dim_color=config['decoder']['hidden_dim_color'],
                                   num_layers_color=config['decoder']['num_layers_color'])
+        self.uncert_linear = nn.Linear(self.sdf_net.output_dim, 1)
+        self.softplus = nn.Softplus()
 
     def forward(self, embed, embed_pos):
         # embed_pos: [174080,48]
@@ -145,15 +146,15 @@ class ColorSDFNet_v3(nn.Module):
         else:
             h = self.sdf_net(embed, return_geo=True)
 
-        sdf, geo_feat = h[..., 0], h[..., 2:]
-        beta = h[..., 1]
-        beta = beta.unsqueeze(-1)
+        sdf, geo_feat = h[..., 0], h[..., 1:]
+        beta = self.uncert_linear(h)
+        beta = self.softplus(beta) + self.beta_min
         sdf = sdf.unsqueeze(-1)
         if embed_pos is not None:
             rgb = self.color_net(torch.cat([embed_pos, geo_feat], dim=-1))
         else:
             rgb = self.color_net(torch.cat([geo_feat], dim=-1))
-
+        self.beta = beta
         return torch.cat([rgb, sdf, beta], -1)
 
 
