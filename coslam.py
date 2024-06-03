@@ -585,8 +585,13 @@ class CoSLAM():
             self.est_c2w_data_rel[frame_id] = delta
 
         print(
-            'Best loss: {}, Last loss{}'.format(F.l1_loss(best_c2w_est.to(self.device)[0, :3], c2w_gt[:3]).cpu().item(),
-                                                F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item()))
+            'it: {}, Best loss: {:.5f}, Last loss: {:.5f}, PSNR {:.5f}'.format(frame_id,
+                                                                               F.l1_loss(
+                                                                                   best_c2w_est.to(self.device)[0, :3],
+                                                                                   c2w_gt[:3]).cpu().item(),
+                                                                               F.l1_loss(c2w_est[0, :3],
+                                                                                         c2w_gt[:3]).cpu().item(),
+                                                                               ret['psnr'].cpu().item()))
 
     def convert_relative_pose(self):
         poses = {}
