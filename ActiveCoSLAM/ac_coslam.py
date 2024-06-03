@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 
 # from tqdm import tqdm
 from tqdm import tqdm
-from tqdm.rich import trange
+from tqdm import trange
 
 # Local imports
 import config
@@ -226,7 +226,7 @@ class CoSLAM:
         # model.eval()是利用到了所有网络连接。
 
         # Training
-        for i in trange(n_iters):  # 1000
+        for i in range(n_iters):  # 1000
             # ********************* 获得第0帧每个像素的颜色，深度，方向 *********************
             print("iter:", i + 1, "/", n_iters, "\r", end="")
 
@@ -860,11 +860,13 @@ class CoSLAM:
             self.est_c2w_data_rel[frame_id] = delta
 
         print(
-            "iter: {}, Best loss: {:.4f}, Last loss: {:.4f}".format(frame_id,
-                                                                    F.l1_loss(best_c2w_est.to(self.device)[0, :3],
-                                                                              c2w_gt[:3]).cpu().item(),
-                                                                    F.l1_loss(c2w_est[0, :3], c2w_gt[:3]).cpu().item(),
-                                                                    )
+            "it: {}, Best loss: {:.5f}, Last loss: {:.5f}, PSNR {:.5f}".format(frame_id,
+                                                                               F.l1_loss(
+                                                                                   best_c2w_est.to(self.device)[0, :3],
+                                                                                   c2w_gt[:3]).cpu().item(),
+                                                                               F.l1_loss(c2w_est[0, :3],
+                                                                                         c2w_gt[:3]).cpu().item(),
+                                                                               ret["psnr"].item())
         )
 
     def convert_relative_pose(self):
