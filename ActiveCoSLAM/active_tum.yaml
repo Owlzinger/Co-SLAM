@@ -95,11 +95,11 @@ training:
   smooth_pts: 64
   smooth_vox: 0.04
   smooth_margin: 0.
-  #n_samples: 256
+  #  n_samples: 256
   n_samples_d: 64
   range_d: 0.25
   n_range_d: 21
-  n_importance: 0
+  n_importance: 128
   perturb: 1
   white_bkgd: False
   trunc: 0.05

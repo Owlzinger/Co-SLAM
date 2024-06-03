@@ -1045,7 +1045,7 @@ class CoSLAM:
                         print("add keyframe:", i)
                     # 从第 30个图片开始,每 5 张图片使用信息增益进行一次关键帧选择
                     else:
-                        downsampled_H, downsampled_W = (self.dataset.H // 2, self.dataset.W // 2)  # 只取 1/4 的点,
+                        downsampled_H, downsampled_W = (self.dataset.H // 4, self.dataset.W // 4)  # 只取 1/4 的点,
                         # 原论文是 1/2的点, 但会出现 OOM
                         samples_num = downsampled_H * downsampled_W  # 采样点数量
                         # *********添加关键帧***************************

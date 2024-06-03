@@ -1,4 +1,6 @@
 import os
+from datetime import datetime
+
 # os.environ['TCNN_CUDA_ARCHITECTURES'] = '86'
 
 # Package imports
