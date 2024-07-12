@@ -62,7 +62,7 @@ pos:
   n_bins: 16
 
 decoder:
-  geo_feat_dim: 15
+  geo_feat_dim: 16
   hidden_dim: 32
   num_layers: 2
   num_layers_color: 2

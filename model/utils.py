@@ -2,13 +2,15 @@
 import torch
 import torch.nn.functional as F
 from math import exp, log, floor
+import numpy as np
 
 
 def mse2psnr(x):
     '''
     MSE to PSNR
     '''
-    return -10. * torch.log(x) / torch.log(torch.Tensor([10.])).to(x)
+    return -10. * torch.log(x + 1e-6) / torch.log(torch.Tensor([10.])).to(x)
+
 
 def coordinates(voxel_dim, device: torch.device):
     '''
@@ -26,6 +28,7 @@ def coordinates(voxel_dim, device: torch.device):
 
     return torch.stack((x.flatten(), y.flatten(), z.flatten()))
 
+
 def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
     '''
     Params:
@@ -39,9 +42,9 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
     device = weights.device
     # Get pdf
     weights = weights + 1e-5  # prevent nans
-    pdf = weights / torch.sum(weights, -1, keepdim=True) # Bs, N_samples-2
-    cdf = torch.cumsum(pdf, -1) 
-    cdf = torch.cat([torch.zeros_like(cdf[..., :1], device=device), cdf], -1) # Bs, N_samples-1
+    pdf = weights / torch.sum(weights, -1, keepdim=True)  # Bs, N_samples-2
+    cdf = torch.cumsum(pdf, -1)
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1], device=device), cdf], -1)  # Bs, N_samples-1
     # Take uniform samples
     if det:
         u = torch.linspace(0. + 0.5 / N_importance, 1. - 0.5 / N_importance, steps=N_importance, device=device)
@@ -67,16 +70,21 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
 
     return samples
 
-def batchify(fn, chunk=1024*64):
-        """Constructs a version of 'fn' that applies to smaller batches.
-        """
-        if chunk is None:
-            return fn
-        def ret(inputs, inputs_dir=None):
-            if inputs_dir is not None:
-                return torch.cat([fn(inputs[i:i+chunk], inputs_dir[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
-            return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
-        return ret
+
+def batchify(fn, chunk=1024 * 64):
+    """Constructs a version of 'fn' that applies to smaller batches.
+    """
+    if chunk is None:
+        return fn
+
+    def ret(inputs, inputs_dir=None):
+        if inputs_dir is not None:
+            return torch.cat(
+                [fn(inputs[i:i + chunk], inputs_dir[i:i + chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+        return torch.cat([fn(inputs[i:i + chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+
+    return ret
+
 
 def get_masks(z_vals, target_d, truncation):
     '''
@@ -108,6 +116,7 @@ def get_masks(z_vals, target_d, truncation):
 
     return front_mask, sdf_mask, fs_weight, sdf_weight
 
+
 def compute_loss(prediction, target, loss_type='l2'):
     '''
     Params: 
@@ -124,7 +133,8 @@ def compute_loss(prediction, target, loss_type='l2'):
         return F.l1_loss(prediction, target)
 
     raise Exception('Unsupported loss type')
-    
+
+
 def get_sdf_loss(z_vals, target_d, predicted_sdf, truncation, loss_type=None, grad=None):
     '''
     Params:
@@ -139,8 +149,10 @@ def get_sdf_loss(z_vals, target_d, predicted_sdf, truncation, loss_type=None, gr
     '''
     front_mask, sdf_mask, fs_weight, sdf_weight = get_masks(z_vals, target_d, truncation)
 
-    fs_loss = compute_loss(predicted_sdf * front_mask, torch.ones_like(predicted_sdf) * front_mask, loss_type) * fs_weight
-    sdf_loss = compute_loss((z_vals + predicted_sdf * truncation) * sdf_mask, target_d * sdf_mask, loss_type) * sdf_weight
+    fs_loss = compute_loss(predicted_sdf * front_mask, torch.ones_like(predicted_sdf) * front_mask,
+                           loss_type) * fs_weight
+    sdf_loss = compute_loss((z_vals + predicted_sdf * truncation) * sdf_mask, target_d * sdf_mask,
+                            loss_type) * sdf_weight
 
     if grad is not None:
         eikonal_loss = (((grad.norm(2, dim=-1) - 1) ** 2) * sdf_mask / sdf_mask.sum()).sum()
