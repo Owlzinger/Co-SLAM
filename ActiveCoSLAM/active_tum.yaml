@@ -99,7 +99,7 @@ training:
   n_samples_d: 64
   range_d: 0.25
   n_range_d: 21
-  n_importance: 128
+  n_importance: 0
   perturb: 1
   white_bkgd: False
   trunc: 0.05

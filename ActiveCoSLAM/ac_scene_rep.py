@@ -126,6 +126,7 @@ class JointEncoding(nn.Module):
         rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]# raw光线的前三列是rgb值[N_rays, N_samples, 3][2048, 85, 3]
         uncert = raw[..., 4]
         # raw的最后一列是不确定度, unsqueeze(-1)是为了和rgb的维度对齐,softplus是为了保证不确定度是正数
+        sdf = raw[..., 3]
         weights = self.sdf2weights(raw[..., 3], z_vals, args=self.config)  # 通过raw的第四列深度值sdf,得到论文公式5的权重  [2048,85]
         rgb_map = torch.sum(weights[..., None] * rgb, -2)  # 论文4式，计算rgb图 [N_rays, 3] [2048,3]
         uncert_map = torch.sum(weights * weights * uncert, -1)
@@ -138,7 +139,7 @@ class JointEncoding(nn.Module):
         if white_bkgd:
             rgb_map = rgb_map + (1. - acc_map[..., None])
 
-        return rgb_map, disp_map, acc_map, weights, depth_map, depth_var, uncert_map
+        return rgb_map, disp_map, acc_map, weights, depth_map, depth_var, uncert_map, sdf
 
     def query_sdf(self, query_points, return_geo=False, embed=False):
         '''
@@ -256,7 +257,7 @@ class JointEncoding(nn.Module):
             z_samples = z_samples[None, :].repeat(n_rays, 1) + target_d
             # squeeze()函数是为了去除张量中维度为1的维度
             # 对于目标深度为负值的点：
-            # 将目标深度为负的那些取样点改为在深度near=0 到 far=5 的范围内生成n_range_d==21个等间隔张量            # 深度值被赋给z_samples中相应位置，覆盖原先的目标深度为负值的部分。
+            # 将目标深度为负的那些取样点改为在深度near=0 到 far=5 的范围内生成n_range_d==21个等间隔张量 深度值被赋给z_samples中相应位置，覆盖原先的目标深度为负值的部分。
             # 使用前的张量是：
             # tensor([[1],
             #         [2],
@@ -290,10 +291,10 @@ class JointEncoding(nn.Module):
         pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]  # [N_rays, N_samples, 3]
         raw = self.run_network(pts)
         # TODO 更改返回
-        rgb_map, disp_map, acc_map, weights, depth_map, depth_var, uncert_map = self.raw2outputs(raw, z_vals,
-                                                                                                 self.config[
-                                                                                                     'training'][
-                                                                                                     'white_bkgd'])
+        rgb_map, disp_map, acc_map, weights, depth_map, depth_var, uncert_map, sdf = self.raw2outputs(raw, z_vals,
+                                                                                                      self.config[
+                                                                                                          'training'][
+                                                                                                          'white_bkgd'])
 
         # Importance sampling
         # 默认不执行
@@ -310,15 +311,16 @@ class JointEncoding(nn.Module):
                                                                 None]  # [N_rays, N_samples + N_importance, 3]
 
             raw = self.run_network(pts)
-            rgb_map, disp_map, acc_map, weights, depth_map, depth_var, uncert_map = self.raw2outputs(raw, z_vals,
-                                                                                                     self.config[
-                                                                                                         'training'][
-                                                                                                         'white_bkgd'])
+            rgb_map, disp_map, acc_map, weights, depth_map, depth_var, uncert_map, sdf = self.raw2outputs(raw, z_vals,
+                                                                                                          self.config[
+                                                                                                              'training'][
+                                                                                                              'white_bkgd'])
 
         # Return rendering outputs
         ret = {'rgb': rgb_map, 'depth': depth_map,
                'disp_map': disp_map, 'acc_map': acc_map,
                'depth_var': depth_var, 'uncert_map': uncert_map,
+               'sdf': sdf,
                'weights': weights}
         ret = {**ret, 'z_vals': z_vals}
 
@@ -383,7 +385,9 @@ class JointEncoding(nn.Module):
 
         ## 2. Get sdf loss/free space loss 公式七
         z_vals = rend_dict['z_vals']  # [N_rand, N_samples + N_importance]
-        sdf = rend_dict['raw'][..., -1]  # [N_rand, N_samples + N_importance]
+        # sdf = rend_dict['raw'][..., -2]  # [N_rand, N_samples + N_importance]
+        sdf = rend_dict['sdf']  # [N_rand, N_samples + N_importance]
+
         truncation = self.config['training']['trunc'] * self.config['data']['sc_factor']
         fs_loss, sdf_loss = get_sdf_loss(z_vals, target_d, sdf, truncation, 'l2', grad=None)
 
