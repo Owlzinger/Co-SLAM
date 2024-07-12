@@ -25,10 +25,10 @@ from tqdm import trange
 # Local imports
 import config
 
-from ActiveCoSLAM.ac_scene_rep import JointEncoding
-from ActiveCoSLAM.ac_dataset import get_dataset
+from ac_scene_rep import JointEncoding
+from ac_dataset import get_dataset
 from utils import coordinates, extract_mesh, colormap_image
-from ActiveCoSLAM.ac_keyframe import KeyFrameDatabase
+from ac_keyframe import KeyFrameDatabase
 
 # from model.scene_rep import JointEncoding
 from tools.eval_ate import pose_evaluation
@@ -965,11 +965,6 @@ class CoSLAM:
         # 循环次数= (总数-初始数)/每次添加的数
         # n_iter = (dataset_size - init_image) // self.config["active"]["choose_k"] + 1
         topK = self.config["active"]["choose_k"]
-        # for i in range(1000):
-        # train_loader = DataLoader(
-        #     train_dataset, num_workers=self.config["data"]["num_workers"]
-        # )
-        # i_end = len(train_dataset)
         i_end = len(self.dataset)
         i = 0
 
@@ -1019,9 +1014,6 @@ class CoSLAM:
                 self.first_frame_mapping(
                     batch, self.config["mapping"]["first_iters"]
                 )
-                # self.first_frame_mapping(
-                #     batch, 100
-                # )  # first_iters=1000
 
             # 建立每一帧的地图和位姿估计
             # Tracking + Mapping
