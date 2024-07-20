@@ -1,70 +1,11 @@
 # Package imports
-
 import torch
 import torch.nn as nn
 import tinycudann as tcnn
 
 
-class SDFNet(nn.Module):
-    def __init__(self, config, input_ch=3, geo_feat_dim=15, hidden_dim=64, num_layers=2):
-        super(SDFNet, self).__init__()
-        self.config = config
-        self.input_ch = input_ch
-        self.geo_feat_dim = geo_feat_dim
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.isActive = config['active']['isActive']
-        self.model = self.get_model(tcnn_network=config['decoder']['tcnn_network'])
-
-    def forward(self, x, return_geo=True):
-        out = self.model(x)
-
-        if return_geo:  # return feature
-            return out
-        else:
-            return out[..., :1]
-
-    def get_model(self, tcnn_network=False):
-        # TUM.yaml: tcnn_network=False
-        if tcnn_network:
-            print('SDF net: using tcnn')
-            return tcnn.Network(
-                n_input_dims=self.input_ch,
-                n_output_dims=1 + self.geo_feat_dim + 1,
-                network_config={
-                    "otype": "FullyFusedMLP",
-                    "activation": "ReLU",
-                    "output_activation": "Softplus",
-                    "n_neurons": self.hidden_dim,
-                    "n_hidden_layers": self.num_layers - 1,
-                },
-                # dtype=torch.float
-            )
-        else:
-            sdf_net = []
-            for l in range(self.num_layers):  # num_layers=2
-                if l == 0:
-                    in_dim = self.input_ch
-                else:
-                    in_dim = self.hidden_dim
-
-                if l == self.num_layers - 1:
-                    if self.isActive:
-                        out_dim = 2 + self.geo_feat_dim  # 1 sigma + 15 SH features for color + 1 beta/不确定度 ---> 17
-                    else:
-                        out_dim = 1 + self.geo_feat_dim
-                else:
-                    out_dim = self.hidden_dim
-
-                sdf_net.append(nn.Linear(in_dim, out_dim, bias=False))
-                if l != self.num_layers - 1:
-                    sdf_net.append(nn.ReLU(inplace=True))
-
-            return nn.Sequential(*nn.ModuleList(sdf_net))
-
-
 class ColorNet(nn.Module):
-    def __init__(self, config, input_ch=4, geo_feat_dim=15,
+    def __init__(self, config, input_ch=4, geo_feat_dim=16,
                  hidden_dim_color=64, num_layers_color=3):
         super(ColorNet, self).__init__()
         self.config = config
@@ -114,6 +55,101 @@ class ColorNet(nn.Module):
         return nn.Sequential(*nn.ModuleList(color_net))
 
 
+class SDFNet(nn.Module):
+    def __init__(self, config, input_ch=3, geo_feat_dim=16, hidden_dim=64, num_layers=2):
+        super(SDFNet, self).__init__()
+        self.config = config
+        self.input_ch = input_ch
+        self.geo_feat_dim = geo_feat_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.output_dim = self.geo_feat_dim
+        self.model = self.get_model(tcnn_network=config['decoder']['tcnn_network'])
+
+    def forward(self, x, return_geo=True):
+        out = self.model(x)
+
+        if return_geo:  # return feature
+            return out
+        else:
+            return out[..., :1]
+
+    def get_model(self, tcnn_network=False):
+        if tcnn_network:
+            print('SDF net: using tcnn')
+            return tcnn.Network(
+                n_input_dims=self.input_ch,
+                # n_output_dims=1 + self.geo_feat_dim,
+                n_output_dims=self.geo_feat_dim,  # 不需要加一因为第一个网络全部都是输出
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": self.hidden_dim,
+                    "n_hidden_layers": self.num_layers - 1,
+                },
+                # dtype=torch.float
+            )
+        else:
+            sdf_net = []
+            for l in range(self.num_layers):  # num_layers=2
+                if l == 0:
+                    in_dim = self.input_ch
+                else:
+                    in_dim = self.hidden_dim
+
+                if l == self.num_layers - 1:
+                    # out_dim = 1 + self.geo_feat_dim  # 1 sigma + 15 SH features for color ---> 16
+                    out_dim = self.geo_feat_dim  # 不需要加一了, 因为第一个网络全部都需要输出
+                else:
+                    out_dim = self.hidden_dim
+
+                sdf_net.append(nn.Linear(in_dim, out_dim, bias=False))
+                if l != self.num_layers - 1:
+                    sdf_net.append(nn.ReLU(inplace=True))
+
+            return nn.Sequential(*nn.ModuleList(sdf_net))
+
+
+class ColorSDFNet(nn.Module):
+    '''
+    Color grid + SDF grid
+    # 允许颜色网络直接访问原始的颜色嵌入信息(ColorSDFNet的特点)
+
+    '''
+
+    def __init__(self, config, input_ch=3, input_ch_pos=12):
+        raise NotImplementedError
+
+    #     super(ColorSDFNet, self).__init__()
+    #     self.config = config
+    #     self.color_net = ColorNet(config,
+    #                               input_ch=input_ch + input_ch_pos,
+    #                               geo_feat_dim=config['decoder']['geo_feat_dim'],
+    #                               hidden_dim_color=config['decoder']['hidden_dim_color'],
+    #                               num_layers_color=config['decoder']['num_layers_color'])
+    #     self.sdf_net = SDFNet(config,
+    #                           input_ch=input_ch + input_ch_pos,
+    #                           geo_feat_dim=config['decoder']['geo_feat_dim'],
+    #                           hidden_dim=config['decoder']['hidden_dim'],
+    #                           num_layers=config['decoder']['num_layers'])
+    #
+    # def forward(self, embed, embed_pos, embed_color):
+    #
+    #     if embed_pos is not None:
+    #         h = self.sdf_net(torch.cat([embed, embed_pos], dim=-1), return_geo=True)
+    #     else:
+    #         h = self.sdf_net(embed, return_geo=True)
+    #
+    #     sdf, geo_feat = h[..., :1], h[..., 1:]
+    #     if embed_pos is not None:
+    #         rgb = self.color_net(torch.cat([embed_pos, embed_color, geo_feat], dim=-1))
+    #     else:
+    #         rgb = self.color_net(torch.cat([embed_color, geo_feat], dim=-1))
+    #
+    #     return torch.cat([rgb, sdf], -1)
+
+
 class ColorSDFNet_v3(nn.Module):
     '''
     No color grid
@@ -124,31 +160,35 @@ class ColorSDFNet_v3(nn.Module):
     def __init__(self, config, input_ch=3, input_ch_pos=12):
         super(ColorSDFNet_v3, self).__init__()
         self.config = config
-        self.beta_min = self.config['active']['beta_min']
-        self.sdf_net = SDFNet(config,
-                              input_ch=input_ch + input_ch_pos,
-                              geo_feat_dim=config['decoder']['geo_feat_dim'],
-                              hidden_dim=config['decoder']['hidden_dim'],
-                              num_layers=config['decoder']['num_layers'])
         self.color_net = ColorNet(config,
                                   input_ch=input_ch_pos,
                                   geo_feat_dim=config['decoder']['geo_feat_dim'],
                                   hidden_dim_color=config['decoder']['hidden_dim_color'],
                                   num_layers_color=config['decoder']['num_layers_color'])
+        self.sdf_net = SDFNet(config,
+                              input_ch=input_ch + input_ch_pos,
+                              geo_feat_dim=config['decoder']['geo_feat_dim'],
+                              hidden_dim=config['decoder']['hidden_dim'],
+                              num_layers=config['decoder']['num_layers'])
+        self.beta_min = 1e-4
+        self.softplus = nn.Softplus()
+        W = self.sdf_net.output_dim
+        self.feature_linear = nn.Linear(W, W)
+        self.sdf_linear = nn.Linear(W, 1)
+        self.uncertainty_linear = nn.Linear(W, 1)
 
     def forward(self, embed, embed_pos):
         # embed_pos: [174080,48]
         # embed: [174080,32]
 
-        if embed_pos is not None:  # True
+        if embed_pos is not None:
             h = self.sdf_net(torch.cat([embed, embed_pos], dim=-1), return_geo=True)
         else:
             h = self.sdf_net(embed, return_geo=True)
 
-        sdf, geo_feat = h[..., 0], h[..., 2:]
-        beta = h[..., 1]
-        beta = beta.unsqueeze(-1)
-        sdf = sdf.unsqueeze(-1)
+        sdf = self.sdf_linear(h)
+        beta = self.softplus(self.uncertainty_linear(h)) + self.beta_min
+        geo_feat = self.feature_linear(h)
         if embed_pos is not None:
             rgb = self.color_net(torch.cat([embed_pos, geo_feat], dim=-1))
         else:
@@ -176,7 +216,7 @@ if __name__ == '__main__':
                      'best': False},
         'grid': {'enc': 'HashGrid', 'tcnn_encoding': True, 'hash_size': 16, 'voxel_color': 0.04, 'voxel_sdf': 0.02,
                  'oneGrid': True}, 'pos': {'enc': 'OneBlob', 'n_bins': 16},
-        'decoder': {'geo_feat_dim': 15, 'hidden_dim': 32, 'num_layers': 2, 'num_layers_color': 2,
+        'decoder': {'geo_feat_dim': 16, 'hidden_dim': 32, 'num_layers': 2, 'num_layers_color': 2,
                     'hidden_dim_color': 32,
                     'tcnn_network': False},
         'cam': {'H': 480, 'W': 640, 'fx': 517.3, 'fy': 516.5, 'cx': 318.6, 'cy': 255.3, 'png_depth_scale': 5000.0,
@@ -189,25 +229,45 @@ if __name__ == '__main__':
                      'trunc': 0.05,
                      'rot_rep': 'axis_angle', 'rgb_missing': 1.0},
         'mesh': {'resolution': 512, 'render_color': False, 'vis': 500, 'voxel_eval': 0.05, 'voxel_final': 0.03,
-                 'visualisation': False},
-        "active": {"active": True},
-        'inherit_from': 'configs/Tum/tum.yaml'
-    }
+                 'visualisation': False}, 'inherit_from': 'configs/Tum/tum.yaml'}
     model = ColorSDFNet_v3(config, input_ch=32, input_ch_pos=48)
     # embed_pos: [174080,48]
     # embed: [174080,32]
     embed = torch.randn(174080, 32)
     embed_pos = torch.randn(174080, 48)
     model.forward(embed, embed_pos)
-
-    colornet = ColorNet(config, input_ch=48, geo_feat_dim=config['decoder']['geo_feat_dim'],
+    # 导出模型为ONNX格式
+    torch.onnx.export(model,  # 导出的模型
+                      (embed, embed_pos),  # 模型输入 (元组或张量列表)
+                      "color_sdf_netv2.onnx",  # 保存的文件路径
+                      input_names=['embed', 'embed_pos'],  # 输入名称
+                      output_names=['output'],
+                      export_params=True,
+                      )
+    colornet = ColorNet(config,
+                        input_ch=48,
+                        geo_feat_dim=config['decoder']['geo_feat_dim'],
                         hidden_dim_color=config['decoder']['hidden_dim_color'],
                         num_layers_color=config['decoder']['num_layers_color'])
     inputfeat4colornet = torch.randn(174080, 63)
-    colornet.forward(inputfeat4colornet)
 
-    sdfnet = SDFNet(config, input_ch=32 + 48, geo_feat_dim=config['decoder']['geo_feat_dim'],
+    torch.onnx.export(colornet,  # 导出的模型
+                      inputfeat4colornet,  # 模型输入 (元组或张量列表)
+                      "colornet.onnx",  # 保存的文件路径
+                      input_names=['inputfeat'],  # 输入名称
+                      output_names=['output'],
+                      export_params=True,
+                      )
+    sdfnet = SDFNet(config,
+                    input_ch=32 + 48,
+                    geo_feat_dim=config['decoder']['geo_feat_dim'],
                     hidden_dim=config['decoder']['hidden_dim'],
                     num_layers=config['decoder']['num_layers'])
     x4SDFNet = torch.randn(174080, 32 + 48)
-    sdfnet.forward(x4SDFNet)
+    torch.onnx.export(sdfnet,  # 导出的模型
+                      x4SDFNet,  # 模型输入 (元组或张量列表)
+                      "sdfnet.onnx",  # 保存的文件路径
+                      input_names=['x'],  # 输入名称
+                      output_names=['output'],
+                      export_params=True,
+                      )

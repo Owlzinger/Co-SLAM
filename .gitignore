@@ -6,3 +6,4 @@
 data/
 output/
 external/
+__pycache__
